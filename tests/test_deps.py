@@ -7,14 +7,41 @@ an apt command for a package that is not in apt, is the failure mode these
 guard against.
 """
 
+import io
 import os
 import sys
+import tempfile
 import unittest
 import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import deps  # noqa: E402
+
+
+class FakeResponse(io.BytesIO):
+    def __init__(self, data, headers=None):
+        super().__init__(data)
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def opener_for(data, headers=None):
+    def open_it(_request, timeout=None):
+        return FakeResponse(data, headers)
+    return open_it
+
+
+def failing_opener(exc):
+    def open_it(_request, timeout=None):
+        raise exc
+    return open_it
 
 
 def which_none(_name):
@@ -188,6 +215,69 @@ class TestArchiveSafety(unittest.TestCase):
             self.assertTrue(os.path.exists(
                 os.path.join(dest, "nested", "ryzenadj.exe")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "escaped.exe")))
+
+
+class TestFetching(unittest.TestCase):
+    """The app's only network access: resolving and pulling a GitHub release."""
+
+    def test_fetch_text_decodes(self):
+        got = deps.fetch_text("https://x", opener=opener_for(b'{"tag":"v1"}'))
+        self.assertEqual(got, '{"tag":"v1"}')
+
+    def test_fetch_text_survives_bad_bytes(self):
+        got = deps.fetch_text("https://x", opener=opener_for(b"\xff\xfeok"))
+        self.assertIn("ok", got)
+
+    def test_fetch_errors_propagate_for_the_caller_to_fall_back_on(self):
+        # _download_dep catches this and points at the homepage instead.
+        with self.assertRaises(OSError):
+            deps.fetch_text("https://x", opener=failing_opener(OSError("403")))
+
+    def test_filename_strips_query_and_fragment(self):
+        self.assertEqual(
+            deps.filename_for("https://x/y/RyzenAdj-win64.zip?t=1#f"),
+            "RyzenAdj-win64.zip")
+
+    def test_filename_sanitises_separators(self):
+        self.assertNotIn("/", deps.filename_for("https://x/a%2Fb/c:d.zip"))
+
+    def test_filename_falls_back(self):
+        self.assertEqual(deps.filename_for("https://x/"), "download")
+
+    def test_download_streams_to_disk(self):
+        payload = b"x" * 5000
+        with tempfile.TemporaryDirectory() as tmp:
+            path = deps.download_file(
+                "https://x/y/RyzenAdj-win64.zip", tmp,
+                opener=opener_for(payload, {"Content-Length": "5000"}),
+                chunk=1024)
+            self.assertEqual(os.path.basename(path), "RyzenAdj-win64.zip")
+            with open(path, "rb") as fh:
+                self.assertEqual(fh.read(), payload)
+
+    def test_download_reports_progress(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            deps.download_file(
+                "https://x/y/b.zip", tmp,
+                opener=opener_for(b"y" * 3000, {"Content-Length": "3000"}),
+                progress=lambda done, total: seen.append((done, total)),
+                chunk=1000)
+        self.assertEqual(seen[-1], (3000, 3000))
+
+    def test_download_without_content_length(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            deps.download_file("https://x/y/b.zip", tmp,
+                               opener=opener_for(b"z" * 10),
+                               progress=lambda done, total: seen.append(total))
+        self.assertEqual(seen, [None])
+
+    def test_download_creates_the_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "nested", "dir")
+            deps.download_file("https://x/f.zip", dest, opener=opener_for(b"ok"))
+            self.assertTrue(os.path.isfile(os.path.join(dest, "f.zip")))
 
 
 class TestFindInTree(unittest.TestCase):

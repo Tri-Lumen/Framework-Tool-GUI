@@ -8,10 +8,10 @@ finish-args:
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland
-  # The Drivers and Setup tabs fetch Framework's download pages, driver
-  # bundles and helper-tool releases over HTTPS. Without this they cannot
-  # reach anything and every download fails with a connection error.
-  - --share=network
+  # No --share=network on purpose. The Drivers tab only opens links (the
+  # portal handles that, no network permission needed), and the one code
+  # path that downloads anything — fetching a helper's GitHub release — is
+  # Windows-only. Adding it back would widen the sandbox for nothing.
   # REQUIRED: lets the app run framework_tool (and pkexec) on the HOST via
   # flatpak-spawn. EC/firmware access is impossible from inside the sandbox,
   # so this permission is the whole point of the app. It is a deliberate

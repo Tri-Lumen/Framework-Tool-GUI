@@ -63,11 +63,10 @@ flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
   `flatpak-spawn --host` - that is what the
   `--talk-name=org.freedesktop.Flatpak` permission in the manifest is for.
   This is an intentional sandbox escape; without it the app is useless.
-- `--share=network` is in the manifest for the Drivers and Setup tabs, which
-  fetch Framework's download pages, driver bundles and helper-tool releases
-  over HTTPS. Drop it if you never want the app talking to the internet;
-  those two tabs then fail on every fetch and fall back to opening links in
-  the browser.
+- There is deliberately no `--share=network`. The Drivers tab only opens
+  links, which goes through the portal, and the only code path that
+  downloads anything (fetching a helper tool's GitHub release) is
+  Windows-only. Nothing in the Flatpak build needs network access.
 - The Setup tab's installs run on the *host* (same `flatpak-spawn --host`
   path as every other command, plus pkexec), so a helper installed from here
   lands in the host's package manager, not in the sandbox. That is what you

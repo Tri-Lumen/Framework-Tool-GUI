@@ -95,6 +95,31 @@ BACKENDS = {
         "dependency": "ryzenadj",
         "sets_watts": True,
         "note": "Sets the real sustained (STAPM) and boost (PPT fast) limits.",
+        # RyzenAdj writes SoC registers and keeps no state. The platform's
+        # own power management overwrites them, so persistence means
+        # re-running it — on boot, on resume, or on a timer.
+        "volatile": True,
+        "persistence": {
+            "note": "RyzenAdj holds no settings of its own — making a limit "
+                    "stick means re-running it after boot and after resume. "
+                    "On Linux that is a systemd service (plus a "
+                    "sleep.target hook or a timer); on Windows it is a "
+                    "Task Scheduler task triggered at logon and on resume.",
+            "links": {
+                "linux": (
+                    ("RyzenAdj usage notes (upstream)",
+                     "https://github.com/FlyGoat/RyzenAdj#readme"),
+                    ("Writing a systemd service unit",
+                     "https://wiki.archlinux.org/title/Systemd#Writing_unit_files"),
+                ),
+                "windows": (
+                    ("RyzenAdj usage notes (upstream)",
+                     "https://github.com/FlyGoat/RyzenAdj#readme"),
+                    ("schtasks — run a command at logon",
+                     "https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks"),
+                ),
+            },
+        },
     },
     "rapl": {
         "label": "Intel RAPL via powercap (Linux)",
@@ -105,6 +130,22 @@ BACKENDS = {
         "note": "Writes the kernel's powercap limits; needs root and a "
                 "kernel driver that exposes them (Intel always, AMD only on "
                 "some models).",
+        "volatile": True,
+        "persistence": {
+            "note": "The kernel restores its own defaults at boot, so the "
+                    "sysfs write has to be repeated — a systemd service (or "
+                    "a udev rule on the powercap device) is the usual way. "
+                    "Some firmware also re-asserts its own limits on "
+                    "resume.",
+            "links": {
+                "linux": (
+                    ("Kernel powercap / RAPL documentation",
+                     "https://www.kernel.org/doc/html/latest/power/powercap/powercap.html"),
+                    ("Writing a systemd service unit",
+                     "https://wiki.archlinux.org/title/Systemd#Writing_unit_files"),
+                ),
+            },
+        },
     },
     "powercfg": {
         "label": "Windows max processor state (%)",
@@ -115,8 +156,47 @@ BACKENDS = {
         "note": "A frequency cap, not a wattage. Works everywhere and needs "
                 "nothing installed, so it is the fallback when no real TDP "
                 "tool is available.",
+        # The odd one out: powercfg edits the saved power scheme, so this
+        # setting already survives a reboot with nothing extra running.
+        "volatile": False,
+        "persistence": {
+            "note": "Already persistent. powercfg edits the active power "
+                    "scheme, which Windows stores and restores across "
+                    "reboots — nothing has to re-apply it. It does reset if "
+                    "you switch schemes or a vendor utility overwrites "
+                    "them.",
+            "links": {
+                "windows": (
+                    ("powercfg command-line options",
+                     "https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/powercfg-command-line-options"),
+                ),
+            },
+        },
     },
 }
+
+
+def persistence_links(backend_id, os_name):
+    """(label, url) pairs documenting how to make this backend's limit stick.
+
+    Empty for a backend/OS pair with nothing to link. The app does not set
+    any of this up — it has no background processes by design — so these are
+    pointers for someone who wants to do it themselves.
+    """
+    backend = BACKENDS.get(backend_id)
+    if not backend:
+        return []
+    return list(backend["persistence"]["links"].get(os_name, ()))
+
+
+def persistence_note(backend_id):
+    backend = BACKENDS.get(backend_id)
+    return backend["persistence"]["note"] if backend else ""
+
+
+def is_volatile(backend_id):
+    backend = BACKENDS.get(backend_id)
+    return bool(backend["volatile"]) if backend else True
 
 # Best first. available_backends() filters this, it does not reorder it.
 _PREFERENCE = ("ryzenadj", "rapl", "powercfg")

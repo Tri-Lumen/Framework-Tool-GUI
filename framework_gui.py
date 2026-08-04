@@ -28,8 +28,8 @@ own everything a user wants to change:
            SoC owns them — so this shells out to RyzenAdj, the Linux
            powercap sysfs, or Windows' own powercfg. See power.py.
   Setup    Detects and installs those helper tools. See deps.py.
-  Drivers  Framework's driver bundle for the detected system, plus vendor
-           drivers for parts the user swapped in. See drivers.py.
+  Drivers  Links to Framework's downloads list for each device build,
+           plus vendor drivers for swapped-in parts. See drivers.py.
 
 Deliberately excluded: --flash-* / --force. Use the CLI for those.
 """
@@ -167,7 +167,6 @@ class App(tk.Tk):
         # "Restore previous" is possible without a reboot. Same instinct as
         # the fan/backlight tools, which always restore what they found.
         self._power_saved = {}
-        self._driver_links = []
 
         self._build_topbar()
         self._build_tabs()
@@ -522,21 +521,23 @@ class App(tk.Tk):
 
         r = 3
         if meta["sets_watts"]:
-            ttk.Label(f, text="Sustained limit (W)").grid(row=r, column=0, sticky="w")
+            # A packed row rather than grid cells: the grid's stretch column
+            # would otherwise fling the boost field to the far right.
+            fields = ttk.Frame(f)
+            fields.grid(row=r, column=0, columnspan=6, sticky="w")
+            ttk.Label(fields, text="Sustained limit (W)").pack(side="left")
             self.tdp_sustained = tk.StringVar(value="25")
-            ttk.Entry(f, textvariable=self.tdp_sustained, width=6).grid(
-                row=r, column=1, sticky="w")
-            ttk.Label(f, text="Boost limit (W)").grid(row=r, column=2,
-                                                      sticky="w", padx=(12, 0))
+            ttk.Entry(fields, textvariable=self.tdp_sustained, width=6).pack(
+                side="left", padx=(4, 16))
+            ttk.Label(fields, text="Boost limit (W)").pack(side="left")
             self.tdp_boost = tk.StringVar(value="35")
-            ttk.Entry(f, textvariable=self.tdp_boost, width=6).grid(
-                row=r, column=3, sticky="w")
+            ttk.Entry(fields, textvariable=self.tdp_boost, width=6).pack(
+                side="left", padx=(4, 16))
             if self.power_backend == "ryzenadj":
-                ttk.Label(f, text="Temp limit (C)").grid(row=r, column=4,
-                                                         sticky="w", padx=(12, 0))
+                ttk.Label(fields, text="Temp limit (C, optional)").pack(side="left")
                 self.tdp_tctl = tk.StringVar(value="")
-                ttk.Entry(f, textvariable=self.tdp_tctl, width=6).grid(
-                    row=r, column=5, sticky="w")
+                ttk.Entry(fields, textvariable=self.tdp_tctl, width=6).pack(
+                    side="left", padx=4)
             r += 1
 
             presets = ttk.Frame(f)
@@ -553,15 +554,16 @@ class App(tk.Tk):
                            ).pack(side="left", padx=2)
             r += 1
         else:
-            ttk.Label(f, text="Max processor state (%)").grid(row=r, column=0,
-                                                              sticky="w")
+            fields = ttk.Frame(f)
+            fields.grid(row=r, column=0, columnspan=6, sticky="ew")
+            ttk.Label(fields, text="Max processor state (%)").pack(side="left")
             self.tdp_percent = tk.IntVar(value=100)
-            ttk.Scale(f, from_=power.MIN_PERCENT, to=power.MAX_PERCENT,
+            ttk.Label(fields, textvariable=self.tdp_percent, width=4).pack(
+                side="right")
+            ttk.Scale(fields, from_=power.MIN_PERCENT, to=power.MAX_PERCENT,
                       variable=self.tdp_percent,
                       command=lambda v: self.tdp_percent.set(int(float(v)))
-                      ).grid(row=r, column=1, columnspan=3, sticky="ew", padx=6)
-            ttk.Label(f, textvariable=self.tdp_percent, width=4).grid(
-                row=r, column=4, sticky="w")
+                      ).pack(side="left", fill="x", expand=True, padx=6)
             r += 1
 
         actions = ttk.Frame(f)
@@ -574,16 +576,45 @@ class App(tk.Tk):
                    command=self._restore_power).pack(side="left")
         r += 1
 
+        volatile = power.is_volatile(self.power_backend)
         ttk.Label(
-            f, foreground="#a00", wraplength=780, justify="left",
-            text="Power limits set here are volatile: a reboot clears them, "
-                 "and sleep or an AC/battery change often does too. This app "
-                 "starts no background service to re-apply them — reopen this "
-                 "tab and click Apply again. Pushing limits above what the "
-                 "cooling can carry can destabilise the machine; if it locks "
-                 "up, reboot and it comes back at stock."
+            f, foreground="#a00" if volatile else "#555", wraplength=780,
+            justify="left",
+            text=(("Volatile: a reboot clears this, and sleep or an "
+                   "AC/battery change often does too. This app starts no "
+                   "background service to re-apply it — come back and click "
+                   "Apply again, or set up persistence yourself using the "
+                   "links below. ")
+                  if volatile else
+                  "Persistent: this one survives a reboot on its own. ")
+            + power.persistence_note(self.power_backend)
         ).grid(row=r, column=0, columnspan=6, sticky="w", pady=(12, 0))
-        f.columnconfigure(1, weight=1)
+        r += 1
+
+        links = power.persistence_links(
+            self.power_backend, "windows" if IS_WINDOWS else "linux")
+        if links:
+            row = ttk.Frame(f)
+            row.grid(row=r, column=0, columnspan=6, sticky="w", pady=(6, 0))
+            ttk.Label(row, text="Making it persistent:" if volatile
+                      else "Reference:").pack(side="left", padx=(0, 6))
+            for label, url in links:
+                ttk.Button(row, text=label, command=self._open_url(url)
+                           ).pack(side="left", padx=2)
+            r += 1
+
+        # Only the real-wattage backends can push the SoC past what the
+        # cooling carries. powercfg only ever caps frequency downward.
+        if meta["sets_watts"]:
+            ttk.Label(
+                f, foreground="#a00", wraplength=780, justify="left",
+                text="Raising limits beyond what the cooling can carry can "
+                     "destabilise the machine; if it locks up, reboot and it "
+                     "comes back at stock."
+            ).grid(row=r, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        # Every row here is a full-width packed frame or a spanning label, so
+        # the stretch belongs to the grid as a whole, not to one cell.
+        f.columnconfigure(0, weight=1)
 
     def _no_backend_reason(self, vendor):
         if vendor == power.VENDOR_AMD:
@@ -825,7 +856,7 @@ class App(tk.Tk):
         self._append(f"=== Downloading {dep['name']} ===\n")
         dest = deps.tools_dir()
         try:
-            body = drivers.fetch_text(deps.github_latest_api(plan["repo"]),
+            body = deps.fetch_text(deps.github_latest_api(plan["repo"]),
                                       timeout=30)
             release = json.loads(body)
             asset = deps.pick_asset(release.get("assets"), plan["asset_match"])
@@ -835,7 +866,7 @@ class App(tk.Tk):
                     f"{release.get('tag_name', 'the latest release')}")
             self._append(f"{release.get('tag_name', '?')}: "
                          f"{asset['name']}\n")
-            archive = drivers.download_file(
+            archive = deps.download_file(
                 asset["browser_download_url"], dest,
                 progress=self._download_progress)
             self._append(f"Downloaded to {archive}\n")
@@ -868,113 +899,72 @@ class App(tk.Tk):
         entry = drivers.resource_for(self.caps.get("model", ""))
         self._driver_entry = entry
 
-        ttk.Label(f, text=entry["label"], font=("TkDefaultFont", 10, "bold")
-                  ).grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(
-            f, foreground="#555", wraplength=780, justify="left",
-            text=("Framework's driver bundle and BIOS for this system."
-                  if entry["exact"] else
-                  "This system was not matched to a specific Framework "
-                  "download page, so this is the index of all of them.")
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
-
-        ttk.Button(f, text="Open download page",
+        ttk.Label(f, text="This system", font=("TkDefaultFont", 10, "bold")
+                  ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Button(f, text=entry["label"], width=52,
                    command=self._open_url(entry["url"])
-                   ).grid(row=2, column=0, sticky="w")
-        ttk.Button(f, text="Find downloads on that page",
-                   command=self._find_driver_downloads
-                   ).grid(row=2, column=1, sticky="w", padx=6)
-
-        self.driver_choice = tk.StringVar()
-        self.driver_combo = ttk.Combobox(f, textvariable=self.driver_choice,
-                                         state="disabled", width=52)
-        self.driver_combo.grid(row=3, column=0, columnspan=3, sticky="ew",
-                               pady=(8, 0))
-        self.driver_get_btn = ttk.Button(f, text="Download selected",
-                                         state="disabled",
-                                         command=self._download_selected_driver)
-        self.driver_get_btn.grid(row=3, column=3, padx=4, pady=(8, 0))
+                   ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(
+            f, foreground="#555", wraplength=380, justify="left",
+            text=("Opens Framework's downloads list for this build — always "
+                  "the current BIOS and driver bundle."
+                  if entry["exact"] else
+                  "This board was not matched to a specific build, so this "
+                  "is the index of every downloads list.")
+        ).grid(row=1, column=1, columnspan=2, sticky="w", padx=8)
 
         ttk.Separator(f, orient="horizontal").grid(
-            row=4, column=0, columnspan=4, sticky="ew", pady=12)
-        ttk.Label(
-            f, text="Parts you added yourself", font=("TkDefaultFont", 10, "bold")
-        ).grid(row=5, column=0, columnspan=4, sticky="w")
+            row=2, column=0, columnspan=3, sticky="ew", pady=10)
+        ttk.Label(f, text="Every device build",
+                  font=("TkDefaultFont", 10, "bold")
+                  ).grid(row=3, column=0, columnspan=3, sticky="w")
         ttk.Label(
             f, foreground="#555", wraplength=780, justify="left",
-            text="The bundle above covers what the machine shipped with. A "
+            text="Framework keeps one downloads list per build. Pick another "
+                 "if this machine was misdetected, or if you are fetching "
+                 "drivers for a different one."
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        # A combobox rather than a dozen buttons: the catalog is long enough
+        # that stacking it would push everything else off the tab.
+        self.driver_choice = tk.StringVar(value=entry["label"])
+        self._driver_all = drivers.all_resources()
+        ttk.Combobox(f, textvariable=self.driver_choice, state="readonly",
+                     width=52, values=[e["label"] for e in self._driver_all]
+                     ).grid(row=5, column=0, sticky="w")
+        ttk.Button(f, text="Open downloads list",
+                   command=self._open_selected_driver_page
+                   ).grid(row=5, column=1, sticky="w", padx=8)
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=6, column=0, columnspan=3, sticky="ew", pady=10)
+        ttk.Label(
+            f, text="Parts you added yourself", font=("TkDefaultFont", 10, "bold")
+        ).grid(row=7, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            f, foreground="#555", wraplength=780, justify="left",
+            text="The bundles above cover what the machine shipped with. A "
                  "replacement Wi-Fi card, a Graphics Module or another "
                  "swapped part gets its driver from the vendor."
-        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
-        r = 7
+        r = 9
         for extra in drivers.extras_for(self.cpu.get("vendor")):
             ttk.Button(f, text=extra["label"], width=44,
                        command=self._open_url(extra["url"])
-                       ).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+                       ).grid(row=r, column=0, sticky="w", pady=2)
             ttk.Label(f, text=extra["why"], foreground="#555", wraplength=380,
-                      justify="left").grid(row=r, column=2, columnspan=2,
+                      justify="left").grid(row=r, column=1, columnspan=2,
                                            sticky="w", padx=8)
             r += 1
         f.columnconfigure(2, weight=1)
 
-    def _find_driver_downloads(self):
-        self.run_tool(self._find_driver_downloads_tool)
-
-    def _find_driver_downloads_tool(self):
-        url = self._driver_entry["url"]
-        self._append(f"=== Looking for downloads on ===\n{url}\n\n")
-        try:
-            html = drivers.fetch_text(url, timeout=30)
-        except Exception as e:  # noqa: BLE001
-            self._append(f"Could not fetch the page: {e}\n\n"
-                         "Opening it in your browser instead.\n")
-            self.after(0, webbrowser.open, url)
-            return
-        links = drivers.find_downloads(html, url)
-        if not links:
-            self._append("No download links found in the page markup — "
-                         "Framework may have changed the page.\n\n"
-                         "Opening it in your browser instead.\n")
-            self.after(0, webbrowser.open, url)
-            return
-        for link in links:
-            self._append(f"  {link['name']}\n    {link['url']}\n")
-        self.after(0, self._fill_driver_choices, links)
-
-    def _fill_driver_choices(self, links):
-        self._driver_links = links
-        self.driver_combo.configure(values=[link["name"] for link in links],
-                                    state="readonly")
-        self.driver_choice.set(links[0]["name"])
-        self.driver_get_btn.configure(state="normal")
-        self.set_status(f"Found {len(links)} download(s).")
-
-    def _download_selected_driver(self):
-        name = self.driver_choice.get()
-        link = next((x for x in self._driver_links if x["name"] == name), None)
-        if not link:
-            return
-        if not messagebox.askyesno(
-                "Download driver package",
-                f"Download\n\n  {link['name']}\n\nfrom\n\n  {link['url']}\n\n"
-                f"into {drivers.download_dir()}?\n\n"
-                "This app downloads it only — you run the installer "
-                "yourself."):
-            return
-        self.run_tool(lambda: self._download_driver_tool(link))
-
-    def _download_driver_tool(self, link):
-        self._append(f"=== Downloading {link['name']} ===\n")
-        try:
-            path = drivers.download_file(link["url"], drivers.download_dir(),
-                                         timeout=600,
-                                         progress=self._download_progress)
-        except Exception as e:  # noqa: BLE001
-            self._append(f"Download failed: {e}\n")
-            return
-        self._append(f"Saved to {path}\n\nRun it yourself when you are ready; "
-                     "this app does not launch installers.\n")
+    def _open_selected_driver_page(self):
+        label = self.driver_choice.get()
+        entry = next((e for e in self._driver_all if e["label"] == label), None)
+        if entry:
+            webbrowser.open(entry["url"])
+            self.set_status(f"Opened {entry['url']}")
 
     def _open_url(self, url):
         return lambda: webbrowser.open(url)

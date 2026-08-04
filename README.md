@@ -39,7 +39,7 @@ parsers.py         Regex parsers + device detection
 power.py           CPU power-limit (TDP) backends: RyzenAdj, Linux powercap,
                    Windows powercfg
 deps.py            Registry of helper tools and how to install each one
-drivers.py         Framework driver-page catalog + download scraping
+drivers.py         Catalog of Framework's per-build download pages
                    (none of the four import tkinter, so all are unit-testable
                    without a display)
 tests/             Parser tests, GUI smoke tests, packaging checks
@@ -126,11 +126,17 @@ so the app picks a backend from the CPU and OS:
 | Linux powercap (RAPL) | Intel, some AMD | Linux | Kernel long/short power limits — real watts |
 | `powercfg` | any | Windows | Max processor state % — a frequency cap, not a wattage |
 
-Limits set here are **volatile**: a reboot clears them, and sleep or an
-AC/battery transition often does too. Re-applying automatically would need a
-service or scheduled task, which this project deliberately does not have —
-the tab says so and you click Apply again. ARM has no equivalent tool to
-shell out to, and the tab says that too rather than showing dead controls.
+RyzenAdj and RAPL limits are **volatile**: a reboot clears them, and sleep or
+an AC/battery transition often does too. Re-applying automatically would need
+a service or scheduled task, which this project deliberately does not have —
+so the tab links to the documentation for making it stick with *the tool it
+actually used*: a systemd unit for RyzenAdj or RAPL on Linux, a Task
+Scheduler task for RyzenAdj on Windows. `powercfg` is the exception: it edits
+the saved power scheme, so Windows restores it across reboots on its own, and
+the tab says so instead of telling you to re-apply it.
+
+ARM has no equivalent tool to shell out to, and the tab says that rather than
+showing dead controls.
 
 **Setup** — detects the helper tools and installs them. Every install shows
 the exact command (or the page it will open) and waits for you to confirm;
@@ -140,12 +146,14 @@ of a package-manager command that would only fail confusingly. Downloaded
 helpers go in a per-user tools directory, never into the app's own install
 directory.
 
-**Drivers** — maps the detected board to its Framework Knowledge Base page,
-scrapes the driver-bundle link off it, and downloads it to your Downloads
-folder. If the page can't be fetched or its markup has changed, it opens the
-page in your browser rather than failing. The app never runs an installer for
-you. There is also a list of vendor driver pages for parts the bundle does
-not cover — a replacement Wi-Fi card, a Graphics Module, an aftermarket GPU.
+**Drivers** — links, nothing more. Framework publishes one downloads list per
+device build, always carrying the current BIOS and driver bundle, so the tab
+opens the right one rather than trying to guess which file on the page you
+want. The detected build is offered at the top; every other build is in a
+dropdown below it, for when detection misses or you are fetching drivers for
+a different machine. Vendor pages for parts the bundle does not cover — a
+replacement Wi-Fi card, a Graphics Module, an aftermarket GPU — are listed
+separately.
 
 ## Device detection
 

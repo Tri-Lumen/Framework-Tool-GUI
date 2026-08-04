@@ -15,10 +15,9 @@ shells out to the CLI and parses its text output — it has no direct hardware
 access of any kind.
 
 It has since grown past framework_tool, by explicit request, into three more
-tabs that shell out to *other* programs: **Power (TDP)** (RyzenAdj, Linux
-powercap, Windows powercfg), **Setup** (installing those helpers), and
-**Drivers** (Framework's driver bundles and vendor drivers for swapped-in
-parts). Same shape as the rest of the app — run a program, parse its output
+tabs: **Power (TDP)** (RyzenAdj, Linux powercap, Windows powercfg), **Setup**
+(installing those helpers), and **Drivers** (links to Framework's downloads
+list per device build, plus vendor drivers for swapped-in parts). Same shape as the rest of the app — run a program, parse its output
 best-effort — and the same rule: the app never touches hardware itself.
 
 Two distribution targets only, by explicit request: a Windows exe/installer
@@ -40,13 +39,13 @@ parsers.py             Pure-Python: regex parsers + detect_model(). No tkinter
 power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
                         powercfg. Builds commands, does no I/O of its own.
 deps.py                Helper-tool registry: detect, and build install plans.
-drivers.py             Framework driver-page catalog, link scraping, download.
+drivers.py             Framework download-page catalog. Links only, no I/O.
                         (all three follow parsers.py's rules: stdlib only, no
                         tkinter, I/O injected as arguments)
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
 tests/test_power.py    Unit tests for power.py — unit conversions especially.
 tests/test_deps.py     Unit tests for deps.py — every install plan path.
-tests/test_drivers.py  Unit tests for drivers.py — board matching + scraping.
+tests/test_drivers.py  Unit tests for drivers.py — board matching + catalog.
 tests/test_smoke_gui.py Full-app tests: real App(), real mainloop(), stub CLI
                         binary on PATH, assert on which buttons survive gating.
                         Needs a display (xvfb-run on headless Linux); skips
@@ -148,10 +147,15 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   - `drivers.py` matches the board string from `--versions` against a
     catalog ordered **most specific first** ("Laptop 13 Pro" must precede
     the entry that matches any "Ryzen AI 300"). Unmatched boards fall back
-    to the Knowledge Base index, never to nothing. Scraping a bundle link
-    out of the page is best-effort; on any failure the GUI opens the page in
-    a browser. Framework's URLs live only in `CATALOG`/`EXTRA`, so fixing a
-    dead link is a one-line change.
+    to the Knowledge Base index, never to nothing. Framework's URLs live
+    only in `CATALOG`/`EXTRA`, so fixing a dead link is a one-line change.
+    It **links and does not fetch**, by request and because it works better:
+    Framework keeps one downloads list per device build that is always
+    current, and the Knowledge Base 403s scripted fetches anyway. An earlier
+    version scraped the bundle link out of the page; `test_drivers.py` has a
+    guard that fails if any networking creeps back into the module. The
+    app's only network access now lives in `deps.py` (fetching a helper's
+    GitHub release), which is why the Flatpak needs no `--share=network`.
 
 - **Blocked commands** (`App.BLOCKED` in `framework_gui.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
@@ -300,15 +304,13 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   "matched the docs, not your version" caveat as the framework_tool parsers.
   Sanity-check on real hardware by applying a limit and reading it back —
   the Power tab does that read-back automatically after Apply.
-- **No driver page has ever been scraped successfully.** `find_downloads()`
-  is tested against synthetic markup. Framework's Knowledge Base returned
-  403 to a scripted fetch during development, so the browser fallback may
-  turn out to be the *normal* path rather than the exception. If it is,
-  consider dropping the scrape and just opening the page.
 - **The Framework Knowledge Base URLs in `drivers.py` were collected from
   search results, not by loading each page.** They are the right shape and
   the right articles, but a moved article shows up as a 404 in someone's
-  browser. Worth one pass with a real browser to confirm all twelve.
+  browser. Now that the tab is links-only these URLs *are* the feature, so
+  confirming all twelve in a real browser matters more than it used to.
+- **The persistence links on the Power tab have not been opened either.**
+  Same caveat, smaller blast radius: a dead one costs a user a search.
 - The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
   crude placeholder, not real artwork.
 
@@ -366,7 +368,6 @@ especially the Flatpak job, which had never been run when it was written.
 5. Apply a power limit on a real AMD Framework with RyzenAdj installed and
    confirm the read-back matches — then do the same for RAPL on Intel Linux
    and `powercfg` on Windows.
-6. Open all twelve Knowledge Base URLs in `drivers.py` in a browser, and see
-   whether "Find downloads on that page" scrapes anything or always falls
-   back to opening the browser.
+6. Open all twelve Knowledge Base URLs in `drivers.py` in a browser and
+   confirm each still resolves — they are the whole Drivers tab now.
 7. Real app icon for the Flatpak `.desktop`/icon file.

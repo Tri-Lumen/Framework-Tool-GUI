@@ -123,6 +123,50 @@ class TestBackendSelection(unittest.TestCase):
         self.assertTrue(power.BACKENDS["ryzenadj"]["sets_watts"])
 
 
+class TestPersistence(unittest.TestCase):
+    """The app never sets persistence up — it links to how. These guard the
+    links, and guard the one backend that is *already* persistent from being
+    described as volatile."""
+
+    def test_powercfg_is_the_persistent_one(self):
+        # powercfg edits the saved power scheme, so Windows restores it
+        # itself. Telling a user to re-apply it every boot would be wrong.
+        self.assertFalse(power.is_volatile("powercfg"))
+        self.assertTrue(power.is_volatile("ryzenadj"))
+        self.assertTrue(power.is_volatile("rapl"))
+
+    def test_every_backend_has_links_for_every_os_it_runs_on(self):
+        for bid, backend in power.BACKENDS.items():
+            for os_name in backend["platforms"]:
+                with self.subTest(backend=bid, os=os_name):
+                    links = power.persistence_links(bid, os_name)
+                    self.assertTrue(links, "no persistence links")
+                    for label, url in links:
+                        self.assertTrue(label)
+                        self.assertTrue(url.startswith("https://"))
+
+    def test_ryzenadj_links_differ_by_os(self):
+        # systemd on Linux, Task Scheduler on Windows — handing a Windows
+        # user a systemd page would be useless.
+        linux = dict(power.persistence_links("ryzenadj", "linux"))
+        windows = dict(power.persistence_links("ryzenadj", "windows"))
+        self.assertTrue(any("systemd" in u.lower() for u in linux.values()))
+        self.assertTrue(any("schtasks" in u.lower() for u in windows.values()))
+
+    def test_every_backend_has_a_note(self):
+        for bid in power.BACKENDS:
+            self.assertTrue(power.persistence_note(bid))
+
+    def test_unknown_backend_degrades_quietly(self):
+        # The tab renders before a backend is chosen; None must not raise.
+        self.assertEqual(power.persistence_links(None, "linux"), [])
+        self.assertEqual(power.persistence_note("nonsense"), "")
+        self.assertTrue(power.is_volatile(None))  # assume the risky answer
+
+    def test_no_links_for_an_os_the_backend_does_not_run_on(self):
+        self.assertEqual(power.persistence_links("rapl", "windows"), [])
+
+
 class TestValidation(unittest.TestCase):
 
     def test_watts_round_trip(self):

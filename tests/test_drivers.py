@@ -1,49 +1,20 @@
-"""Unit tests for drivers.py — matching a detected board to Framework's
-download page, and scraping that page for a bundle.
+"""Unit tests for drivers.py — the catalog of Framework download pages.
 
 The board strings here are the same ones test_parsers.py feeds to
 detect_model(), so the two stay in step: whatever framework_tool reports as
 `Type:` is exactly what resource_for() has to match.
 
-Fetching is exercised with a fake opener — no network, and the tests still
-cover the parts that actually go wrong (a page that 403s, a page whose
-markup changed, a filename with junk in it).
+There is nothing to mock: the module is links only. It used to fetch and
+scrape those pages, and TestNoNetworking keeps it that way.
 """
 
-import io
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import drivers  # noqa: E402
-
-
-class FakeResponse(io.BytesIO):
-    def __init__(self, data, headers=None):
-        super().__init__(data)
-        self.headers = headers or {}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-        return False
-
-
-def opener_for(data, headers=None):
-    def open_it(_request, timeout=None):
-        return FakeResponse(data, headers)
-    return open_it
-
-
-def failing_opener(exc):
-    def open_it(_request, timeout=None):
-        raise exc
-    return open_it
 
 
 class TestResourceMatching(unittest.TestCase):
@@ -117,101 +88,54 @@ class TestExtras(unittest.TestCase):
                          len(drivers.EXTRA))
 
 
-class TestFindDownloads(unittest.TestCase):
+class TestAllResources(unittest.TestCase):
 
-    HTML = """
-      <a href="/download/bundle.exe">Driver Bundle</a>
-      <a href="https://downloads.frame.work/bios/3.05.zip">BIOS</a>
-      <a href="/download/bundle.exe">Driver Bundle (again)</a>
-      <a href="/support">Support</a>
-      <a href="#top">Top</a>
-      <a href="mailto:x@y.z">Mail</a>
-      <a href="/x/setup.exe?ver=2">Setup with query</a>
-    """
+    def test_lists_every_build_plus_the_index(self):
+        got = drivers.all_resources()
+        self.assertEqual(len(got), len(drivers.CATALOG) + 1)
+        self.assertEqual(got[-1]["url"], drivers.KB_INDEX)
 
-    def test_only_downloadable_extensions(self):
-        got = drivers.find_downloads(self.HTML, "https://kb.example/page-abc")
-        names = [x["name"] for x in got]
-        self.assertEqual(names, ["bundle.exe", "3.05.zip", "setup.exe"])
+    def test_labels_are_unique(self):
+        # The UI keys its combobox off the label, so duplicates would make
+        # one of the builds unreachable.
+        labels = [e["label"] for e in drivers.all_resources()]
+        self.assertEqual(len(labels), len(set(labels)))
 
-    def test_relative_links_are_absolutised(self):
-        got = drivers.find_downloads(self.HTML, "https://kb.example/page-abc")
-        self.assertEqual(got[0]["url"], "https://kb.example/download/bundle.exe")
+    def test_urls_are_unique(self):
+        urls = [e["url"] for e in drivers.all_resources()]
+        self.assertEqual(len(urls), len(set(urls)))
 
-    def test_duplicates_collapse(self):
-        got = drivers.find_downloads(self.HTML, "https://kb.example/p")
-        self.assertEqual(len([x for x in got if x["name"] == "bundle.exe"]), 1)
+    def test_callers_cannot_mutate_the_catalog(self):
+        got = drivers.all_resources()
+        got[0]["url"] = "https://example.invalid"
+        self.assertNotEqual(drivers.CATALOG[0]["url"], "https://example.invalid")
 
-    def test_changed_markup_yields_empty_not_garbage(self):
-        # Empty is the signal to open the page in a browser instead.
-        self.assertEqual(drivers.find_downloads("<p>no links</p>", "u"), [])
-        self.assertEqual(drivers.find_downloads("", ""), [])
-
-
-class TestFilenames(unittest.TestCase):
-
-    def test_strips_query_and_fragment(self):
-        self.assertEqual(
-            drivers.filename_for("https://x/y/Bundle_v2.06.exe?t=1#frag"),
-            "Bundle_v2.06.exe")
-
-    def test_sanitises_path_separators(self):
-        self.assertNotIn("/", drivers.filename_for("https://x/a%2Fb/c:d.exe"))
-
-    def test_empty_path_falls_back(self):
-        self.assertEqual(drivers.filename_for("https://x/"), "download")
+    def test_every_detected_build_is_also_in_the_list(self):
+        # resource_for() and the dropdown must agree, or the tab would show
+        # a build at the top that cannot be selected below.
+        labels = {e["label"] for e in drivers.all_resources()}
+        for board in ("Laptop 12 (13th Gen Intel Core)",
+                      "Laptop 13 (AMD Ryzen AI 300 Series)",
+                      "Laptop 16 (AMD Ryzen 7040HS Series)",
+                      "Desktop (AMD Ryzen AI Max 300 Series)",
+                      "Something unrecognised"):
+            with self.subTest(board=board):
+                self.assertIn(drivers.resource_for(board)["label"], labels)
 
 
-class TestFetching(unittest.TestCase):
+class TestNoNetworking(unittest.TestCase):
 
-    def test_fetch_text_decodes(self):
-        got = drivers.fetch_text("https://x", opener=opener_for(b"<p>hi</p>"))
-        self.assertEqual(got, "<p>hi</p>")
+    def test_module_does_not_fetch_anything(self):
+        """This module is a link catalog — nothing here should hit the net.
 
-    def test_fetch_text_survives_bad_bytes(self):
-        got = drivers.fetch_text("https://x", opener=opener_for(b"\xff\xfeok"))
-        self.assertIn("ok", got)
-
-    def test_fetch_errors_propagate_for_the_caller_to_fall_back_on(self):
-        with self.assertRaises(OSError):
-            drivers.fetch_text("https://x",
-                               opener=failing_opener(OSError("403")))
-
-    def test_download_streams_to_disk(self):
-        payload = b"x" * 5000
-        with tempfile.TemporaryDirectory() as tmp:
-            path = drivers.download_file(
-                "https://x/y/bundle.exe", tmp,
-                opener=opener_for(payload, {"Content-Length": "5000"}),
-                chunk=1024)
-            self.assertEqual(os.path.basename(path), "bundle.exe")
-            with open(path, "rb") as fh:
-                self.assertEqual(fh.read(), payload)
-
-    def test_download_reports_progress(self):
-        seen = []
-        with tempfile.TemporaryDirectory() as tmp:
-            drivers.download_file(
-                "https://x/y/b.zip", tmp,
-                opener=opener_for(b"y" * 3000, {"Content-Length": "3000"}),
-                progress=lambda done, total: seen.append((done, total)),
-                chunk=1000)
-        self.assertEqual(seen[-1], (3000, 3000))
-
-    def test_download_without_content_length(self):
-        seen = []
-        with tempfile.TemporaryDirectory() as tmp:
-            drivers.download_file(
-                "https://x/y/b.zip", tmp, opener=opener_for(b"z" * 10),
-                progress=lambda done, total: seen.append(total))
-        self.assertEqual(seen, [None])
-
-    def test_download_creates_the_destination(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = os.path.join(tmp, "nested", "dir")
-            drivers.download_file("https://x/f.zip", dest,
-                                  opener=opener_for(b"ok"))
-            self.assertTrue(os.path.isfile(os.path.join(dest, "f.zip")))
+        Framework's Knowledge Base 403s scripted fetches anyway, so the app
+        links to the downloads lists instead of scraping them. If a fetch
+        creeps back in, it belongs in deps.py with the rest of the I/O.
+        """
+        with open(drivers.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        for forbidden in ("urllib", "http.client", "requests", "socket"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

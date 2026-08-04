@@ -1,14 +1,20 @@
 """
-Framework driver/BIOS resources for a detected system, plus the ones for
-parts a user may have added themselves.
+Framework driver/BIOS download pages, per device build.
+
+This module is a link catalog and nothing else. It deliberately does not
+fetch, scrape or download: Framework publishes a downloads list per device
+build, those lists are always current, and pointing a browser at the right
+one is both more reliable and more honest than trying to guess which file on
+the page is "the" bundle.
 
 Two catalogs:
 
 * CATALOG maps the board string framework_tool reports (`--versions` ->
-  `Type: Laptop 13 (AMD Ryzen AI 300 Series)`) to that system's Framework
-  Knowledge Base page, which is where the Windows driver bundle and BIOS
-  live. The board strings and the page titles line up almost word for word,
-  so matching is substring-based and stays readable.
+  `Type: Laptop 13 (AMD Ryzen AI 300 Series)`) to that build's downloads
+  page. The board strings and the page titles line up almost word for word,
+  so matching is substring-based and stays readable. The whole catalog is
+  also shown in the UI, so a user whose board is misdetected — or who is
+  fetching drivers for a different machine — can still get there.
 * EXTRA maps *swappable* parts to their vendor's download page — a
   replacement Wi-Fi card, a Graphics Module, an expansion bay. The driver
   bundle covers what the machine shipped with; it does not necessarily
@@ -17,22 +23,9 @@ Two catalogs:
 URLs rot. They are all in these two tables and nowhere else, so fixing one
 is a one-line change, and every lookup falls back to the Knowledge Base
 index rather than dead-ending.
-
-Downloading is best-effort in exactly the way the CLI parsers are: the page
-is fetched and scanned for a bundle link, and if that fails for any reason —
-the site changed, a bot check, no network — the caller opens the page in a
-browser instead. This module contains the URL logic and the scraping; the
-GUI owns the threading and the browser.
 """
 
-import os
-import re
-import urllib.request
-
 KB_INDEX = "https://knowledgebase.frame.work/bios-and-drivers-downloads-rJ3PaCexh"
-
-# Sites serving driver bundles reject the stdlib's default User-Agent.
-USER_AGENT = "FrameworkGUI/1.0 (+https://github.com/Tri-Lumen/Framework-Tool-GUI)"
 
 # Most specific first: the first entry whose every `match` fragment appears
 # in the board string wins, so "Laptop 13 Pro" must precede "Laptop 13".
@@ -118,15 +111,6 @@ EXTRA = (
      "url": "https://www.qualcomm.com/support"},
 )
 
-# Files worth offering off a Knowledge Base page. .cab and .msi show up for
-# firmware/driver installers; .7z and .tar.gz never have so far but cost
-# nothing to accept.
-DOWNLOAD_EXTS = (".exe", ".zip", ".msi", ".cab", ".7z", ".tar.gz")
-
-RE_HREF = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
-RE_TAG = re.compile(r"<[^>]+>")
-
-
 def resource_for(board):
     """Knowledge Base entry for a board string from `--versions`.
 
@@ -152,101 +136,10 @@ def extras_for(vendor=None):
     return out
 
 
-def _absolute(url, base):
-    if url.startswith(("http://", "https://")):
-        return url
-    if url.startswith("//"):
-        return "https:" + url
-    m = re.match(r"(https?://[^/]+)", base or "")
-    root = m.group(1) if m else ""
-    if url.startswith("/"):
-        return root + url
-    return base.rsplit("/", 1)[0] + "/" + url if base else url
+def all_resources():
+    """Every device build's downloads page, plus the index, in menu order.
 
-
-def find_downloads(html, base_url=""):
-    """Downloadable links on a Knowledge Base page, in page order.
-
-    Returns [{'url', 'name'}]. Duplicates are collapsed, since these pages
-    link the same bundle from a button and from body text. An empty list is
-    the expected outcome when the page markup changes — the caller opens the
-    page in a browser rather than guessing.
+    The whole catalog is offered, not just the detected build: detection can
+    miss, and people fetch drivers for machines they are not sitting at.
     """
-    seen = set()
-    out = []
-    for m in RE_HREF.finditer(html or ""):
-        raw = m.group(1).strip()
-        if not raw or raw.startswith(("#", "mailto:", "javascript:")):
-            continue
-        url = _absolute(raw, base_url)
-        path = url.split("?", 1)[0].split("#", 1)[0]
-        if not path.lower().endswith(DOWNLOAD_EXTS):
-            continue
-        if url in seen:
-            continue
-        seen.add(url)
-        out.append({"url": url, "name": filename_for(url)})
-    return out
-
-
-def filename_for(url, fallback="download"):
-    """Filename to save a URL as, sanitised for both OSes."""
-    path = url.split("?", 1)[0].split("#", 1)[0]
-    name = path.rsplit("/", 1)[-1]
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
-    return name or fallback
-
-
-def download_dir(environ=None):
-    """The user's Downloads folder, falling back to the home directory."""
-    env = environ if environ is not None else os.environ
-    home = env.get("USERPROFILE") or env.get("HOME") or os.path.expanduser("~")
-    downloads = os.path.join(home, "Downloads")
-    return downloads if os.path.isdir(downloads) else home
-
-
-# ---------- fetching ----------
-#
-# `opener` is injected so these are testable without a network: pass
-# anything with the urlopen(request, timeout) signature.
-
-def _open(url, opener, timeout):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    return (opener or urllib.request.urlopen)(req, timeout=timeout)
-
-
-def fetch_text(url, opener=None, timeout=30, limit=4_000_000):
-    """GET a page as text. `limit` caps how much is read into memory."""
-    with _open(url, opener, timeout) as resp:
-        raw = resp.read(limit)
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", "replace")
-    return raw
-
-
-def download_file(url, dest_dir, opener=None, timeout=120, progress=None,
-                  chunk=64 * 1024):
-    """Stream a URL to `dest_dir`, returning the path written.
-
-    Streams rather than reading into memory — driver bundles run to hundreds
-    of megabytes. `progress(bytes_done, total_or_None)` is called as it goes
-    so the GUI can report something during a long download; a total of None
-    means the server sent no Content-Length.
-    """
-    os.makedirs(dest_dir, exist_ok=True)
-    path = os.path.join(dest_dir, filename_for(url))
-    with _open(url, opener, timeout) as resp:
-        total = resp.headers.get("Content-Length") if hasattr(
-            resp, "headers") else None
-        total = int(total) if total and str(total).isdigit() else None
-        done = 0
-        with open(path, "wb") as fh:
-            while True:
-                block = resp.read(chunk)
-                if not block:
-                    break
-                fh.write(block)
-                done += len(block)
-                if progress:
-                    progress(done, total)
-    return path
+    return [dict(entry) for entry in CATALOG] + [dict(INDEX_ENTRY)]

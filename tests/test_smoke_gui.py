@@ -86,6 +86,7 @@ def _drive_app(timeout_ms):
         results["caps"] = dict(app.caps)
         results["cpu"] = dict(app.cpu)
         results["driver_entry"] = dict(app._driver_entry)
+        results["driver_all"] = list(app._driver_all)
         results["power_backend"] = app.power_backend
         results["detected_var"] = app.detected_var.get()
         results["tabs"] = [app.nb.tab(t, "text") for t in app.nb.tabs()]
@@ -213,8 +214,14 @@ class TestGuiSmoke(unittest.TestCase):
         r = run_app_and_capture(VERSIONS_L16)
         for tab in ("Power (TDP)", "Setup", "Drivers"):
             self.assertIn(tab, r["tabs"])
-        self.assertIn("Open download page", r["Drivers"])
+        self.assertIn("Open downloads list", r["Drivers"])
         self.assertIn("Re-check what is installed", r["Setup"])
+
+    def test_drivers_tab_offers_every_build_not_just_the_detected_one(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        # The detected build is the top button; the rest are in the dropdown.
+        self.assertIn(r["driver_entry"]["label"], r["Drivers"])
+        self.assertEqual(len(r["driver_all"]), len(fg.drivers.CATALOG) + 1)
 
     def test_drivers_tab_matches_the_detected_board(self):
         r = run_app_and_capture(VERSIONS_L16)
@@ -234,7 +241,7 @@ class TestGuiSmoke(unittest.TestCase):
         # No framework_tool, so no board string — the tab still offers the
         # index of every download rather than showing nothing.
         self.assertFalse(r["driver_entry"]["exact"])
-        self.assertIn("Open download page", r["Drivers"])
+        self.assertIn("Open downloads list", r["Drivers"])
 
     def test_power_tab_reports_a_backend_or_explains_itself(self):
         r = run_app_and_capture(VERSIONS_DESKTOP)

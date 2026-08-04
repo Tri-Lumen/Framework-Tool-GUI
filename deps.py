@@ -21,7 +21,11 @@ Two rules the GUI depends on:
 
 import os
 import re
+import urllib.request
 import zipfile
+
+# GitHub's API rejects requests without one.
+USER_AGENT = "FrameworkGUI/1.0 (+https://github.com/Tri-Lumen/Framework-Tool-GUI)"
 
 # Kinds of install plan a dependency can produce.
 KIND_PACKAGE = "package"    # run a package-manager command
@@ -245,6 +249,62 @@ def extract_zip(archive_path, dest_dir):
         members = safe_members(zf.namelist())
         zf.extractall(dest_dir, members=members)
     return members
+
+
+# ---------- fetching ----------
+#
+# The only network access in the whole app: resolving a helper's latest
+# GitHub release and pulling down its archive. `opener` is injected so these
+# are testable without a network — pass anything with the
+# urlopen(request, timeout) signature.
+
+def _open(url, opener, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    return (opener or urllib.request.urlopen)(req, timeout=timeout)
+
+
+def fetch_text(url, opener=None, timeout=30, limit=4_000_000):
+    """GET a URL as text. `limit` caps how much is read into memory."""
+    with _open(url, opener, timeout) as resp:
+        raw = resp.read(limit)
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw
+
+
+def filename_for(url, fallback="download"):
+    """Filename to save a URL as, sanitised for both OSes."""
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    name = path.rsplit("/", 1)[-1]
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+    return name or fallback
+
+
+def download_file(url, dest_dir, opener=None, timeout=120, progress=None,
+                  chunk=64 * 1024):
+    """Stream a URL to `dest_dir`, returning the path written.
+
+    Streams rather than reading into memory. `progress(done, total_or_None)`
+    is called as it goes so the GUI can report something during a long
+    download; a total of None means the server sent no Content-Length.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, filename_for(url))
+    with _open(url, opener, timeout) as resp:
+        total = resp.headers.get("Content-Length") if hasattr(
+            resp, "headers") else None
+        total = int(total) if total and str(total).isdigit() else None
+        done = 0
+        with open(path, "wb") as fh:
+            while True:
+                block = resp.read(chunk)
+                if not block:
+                    break
+                fh.write(block)
+                done += len(block)
+                if progress:
+                    progress(done, total)
+    return path
 
 
 def find_in_tree(root, filename, walker=None):
