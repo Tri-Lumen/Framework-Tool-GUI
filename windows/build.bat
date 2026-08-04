@@ -24,15 +24,15 @@ if errorlevel 1 (
 
 if exist "%WORK%" rmdir /s /q "%WORK%"
 mkdir "%WORK%" || goto :fail
-copy /y "%SRC%..\framework_gui.py" "%WORK%\" >nul || (
-    echo Could not copy framework_gui.py - check the share is reachable.
-    goto :fail
-)
-REM parsers.py is imported by framework_gui.py - without it PyInstaller
-REM builds an exe that dies with ModuleNotFoundError on launch.
-copy /y "%SRC%..\parsers.py" "%WORK%\" >nul || (
-    echo Could not copy parsers.py - check the share is reachable.
-    goto :fail
+REM Every module framework_gui.py imports has to come along. Miss one and
+REM PyInstaller happily builds an exe that dies with ModuleNotFoundError on
+REM launch - invisible from a source checkout, where the import works.
+REM tests/test_packaging.py fails if this list falls behind the repo.
+for %%M in (framework_gui.py parsers.py power.py deps.py drivers.py) do (
+    copy /y "%SRC%..\%%M" "%WORK%\" >nul || (
+        echo Could not copy %%M - check the share is reachable.
+        goto :fail
+    )
 )
 
 pushd "%WORK%" || goto :fail

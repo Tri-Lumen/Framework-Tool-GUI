@@ -1,0 +1,258 @@
+"""
+External helper tools this GUI can drive, and how to install each one.
+
+The GUI only ever *runs* other programs — it has no direct hardware access —
+so "can I do X on this machine" reduces to "is the tool for X installed".
+This module is that registry: what each helper is for, how to detect it, and
+what installing it would actually run. It builds commands and URLs; it does
+not execute anything and does not import tkinter, so it is testable without
+a display.
+
+Two rules the GUI depends on:
+
+* Nothing installs silently. Every entry produces an install *plan* that the
+  caller shows to the user (the exact command, or the page that will open)
+  before anything runs.
+* An unknown answer is "manual", never a guess. Where a distro genuinely has
+  no package — RyzenAdj is not in Debian, Ubuntu or Fedora's repos — the plan
+  says so and points at upstream's instructions instead of running a package
+  manager command that would only fail confusingly.
+"""
+
+import os
+import re
+import zipfile
+
+# Kinds of install plan a dependency can produce.
+KIND_PACKAGE = "package"    # run a package-manager command
+KIND_WINGET = "winget"      # run winget (a package command, named for clarity)
+KIND_DOWNLOAD = "download"  # fetch a release archive and unpack it locally
+KIND_MANUAL = "manual"      # open a page; a human has to take it from here
+
+DEPENDENCIES = (
+    {
+        "id": "framework_tool",
+        "name": "framework_tool",
+        "why": "The Framework CLI everything on the other tabs drives. "
+               "Without it this app can do nothing at all.",
+        "probe": ("framework_tool", "framework-tool"),
+        "vendors": None,          # relevant on every machine
+        "homepage": "https://github.com/FrameworkComputer/framework-system",
+        "windows": {"kind": KIND_WINGET, "package": "framework_tool",
+                    "source": "winget"},
+        # Packaged for a few distros under different names, absent from most.
+        # Upstream's README is the honest answer rather than a command that
+        # fails on whatever the user is actually running.
+        "linux": {"kind": KIND_MANUAL,
+                  "note": "Packaged as framework-system on some distros "
+                          "(AUR: framework-system-git). If yours does not "
+                          "have it, build it from upstream's README."},
+    },
+    {
+        "id": "ryzenadj",
+        "name": "RyzenAdj",
+        "why": "Sets real sustained/boost power limits (STAPM, PPT) on AMD "
+               "Ryzen APUs — the TDP control on the Power tab.",
+        "probe": ("ryzenadj",),
+        "vendors": ("amd",),
+        "homepage": "https://github.com/FlyGoat/RyzenAdj",
+        # Asset names change between releases, so the release is resolved at
+        # runtime through the GitHub API and matched on a substring instead
+        # of hardcoding a filename that will rot.
+        "windows": {"kind": KIND_DOWNLOAD, "repo": "FlyGoat/RyzenAdj",
+                    "asset_match": "win64", "binary": "ryzenadj.exe"},
+        "linux": {"kind": KIND_PACKAGE, "packages": {"yay": "ryzenadj",
+                                                     "paru": "ryzenadj"},
+                  "note": "In the AUR only. On other distros build it from "
+                          "upstream's README — it needs pciutils and cmake."},
+    },
+    {
+        "id": "throttlestop",
+        "name": "ThrottleStop",
+        "why": "Intel power/turbo tuning on Windows. It has no command line, "
+               "so this app can install and launch it but cannot drive it.",
+        "probe": ("ThrottleStop", "ThrottleStop.exe"),
+        "vendors": ("intel",),
+        "homepage": "https://www.techpowerup.com/download/techpowerup-throttlestop/",
+        "windows": {"kind": KIND_MANUAL,
+                    "note": "Downloaded as a zip you unpack yourself; it is "
+                            "not in winget."},
+        "linux": None,  # Windows-only program
+    },
+)
+
+_BY_ID = {d["id"]: d for d in DEPENDENCIES}
+
+# Package managers, most preferred first. AUR helpers come before pacman
+# because the packages we want on Arch live in the AUR, which pacman itself
+# will not install.
+LINUX_MANAGERS = ("yay", "paru", "pacman", "apt-get", "dnf", "zypper")
+
+
+def get(dep_id):
+    return _BY_ID[dep_id]
+
+
+def relevant(os_name, vendor=None):
+    """Dependencies worth showing on this machine.
+
+    Vendor-specific tools are hidden on the wrong CPU, but only when the
+    vendor is actually known — an unknown vendor shows everything, the same
+    fail-open direction parsers.detect_model() takes.
+    """
+    out = []
+    for dep in DEPENDENCIES:
+        if dep.get(os_name, "missing") is None:
+            continue  # explicitly not applicable to this OS
+        vendors = dep.get("vendors")
+        if vendors and vendor and vendor not in vendors and vendor != "unknown":
+            continue
+        out.append(dep)
+    return out
+
+
+def find(dep, which):
+    """Installed path of a dependency, or None. `which` is shutil.which."""
+    for name in dep["probe"]:
+        p = which(name)
+        if p:
+            return p
+    return None
+
+
+def linux_manager(which):
+    """First supported package manager present, or None."""
+    for name in LINUX_MANAGERS:
+        if which(name):
+            return name
+    return None
+
+
+def install_plan(dep, os_name, manager=None):
+    """How to install `dep` here.
+
+    Returns a dict with 'kind', a human 'summary', and depending on kind a
+    'cmd' (argv list), a 'url', and/or a 'note'. Never returns None: an
+    entry with no automated path still yields a manual plan pointing at its
+    homepage, because "there is nothing I can do" is more useful phrased as
+    "here is the page you need".
+    """
+    spec = dep.get(os_name)
+    manual = {
+        "kind": KIND_MANUAL,
+        "url": dep["homepage"],
+        "summary": f"Open the {dep['name']} download page",
+        "note": (spec or {}).get("note") if isinstance(spec, dict) else None,
+    }
+    if not spec:
+        manual["note"] = f"{dep['name']} is not available for this platform."
+        return manual
+
+    kind = spec["kind"]
+    if kind == KIND_WINGET:
+        cmd = ["winget", "install", "--exact", spec["package"]]
+        if spec.get("source"):
+            cmd += ["--source", spec["source"]]
+        cmd += ["--accept-package-agreements", "--accept-source-agreements"]
+        return {"kind": KIND_WINGET, "cmd": cmd,
+                "summary": " ".join(cmd), "note": spec.get("note")}
+
+    if kind == KIND_PACKAGE:
+        package = (spec.get("packages") or {}).get(manager)
+        if not package:
+            manual["note"] = spec.get("note") or manual["note"]
+            return manual
+        if manager in ("yay", "paru"):
+            cmd = [manager, "-S", "--needed", package]
+        elif manager == "pacman":
+            cmd = ["pacman", "-S", "--needed", package]
+        elif manager == "apt-get":
+            cmd = ["apt-get", "install", "-y", package]
+        elif manager == "dnf":
+            cmd = ["dnf", "install", "-y", package]
+        else:
+            cmd = [manager, "install", "-y", package]
+        return {"kind": KIND_PACKAGE, "cmd": cmd,
+                "summary": " ".join(cmd), "note": spec.get("note")}
+
+    if kind == KIND_DOWNLOAD:
+        return {"kind": KIND_DOWNLOAD, "repo": spec["repo"],
+                "asset_match": spec["asset_match"],
+                "binary": spec.get("binary"),
+                "summary": f"Download the latest {spec['asset_match']} release "
+                           f"of {spec['repo']} from GitHub into "
+                           f"{tools_dir()}",
+                "note": spec.get("note")}
+
+    return manual
+
+
+# ---------- GitHub release downloads ----------
+
+def github_latest_api(repo):
+    return f"https://api.github.com/repos/{repo}/releases/latest"
+
+
+def pick_asset(assets, match):
+    """Pick a release asset by case-insensitive substring, archives first.
+
+    `assets` is the GitHub API's asset list. Returns the asset dict or None;
+    None means the caller should fall back to opening the releases page,
+    which is what happens when upstream renames its artifacts.
+    """
+    named = [a for a in (assets or [])
+             if match.lower() in (a.get("name") or "").lower()]
+    if not named:
+        return None
+    archives = [a for a in named
+                if (a.get("name") or "").lower().endswith((".zip", ".7z",
+                                                           ".tar.gz"))]
+    return (archives or named)[0]
+
+
+def tools_dir(environ=None):
+    """Where downloaded helper binaries go.
+
+    Under the user's own data directory, never next to the app: on Windows
+    the app may live in Program Files, and on Linux inside a read-only
+    Flatpak.
+    """
+    env = environ if environ is not None else os.environ
+    local = env.get("LOCALAPPDATA")
+    if local:
+        return os.path.join(local, "FrameworkGUI", "tools")
+    base = env.get("XDG_DATA_HOME") or os.path.join(
+        env.get("HOME", os.path.expanduser("~")), ".local", "share")
+    return os.path.join(base, "framework-gui", "tools")
+
+
+# Path traversal guard for archive members: a crafted zip with ../ entries
+# would otherwise write outside the tools directory.
+RE_UNSAFE_MEMBER = re.compile(r"(^/)|(^[A-Za-z]:)|(\.\.[\\/])")
+
+
+def safe_members(names):
+    return [n for n in names if not RE_UNSAFE_MEMBER.search(n)]
+
+
+def extract_zip(archive_path, dest_dir):
+    """Unpack a downloaded release zip, skipping unsafe member paths.
+
+    Returns the list of extracted names.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as zf:
+        members = safe_members(zf.namelist())
+        zf.extractall(dest_dir, members=members)
+    return members
+
+
+def find_in_tree(root, filename, walker=None):
+    """Locate a binary inside an unpacked release tree (they nest it)."""
+    walk = walker or os.walk
+    target = filename.lower()
+    for dirpath, _dirs, files in walk(root):
+        for f in files:
+            if f.lower() == target:
+                return os.path.join(dirpath, f)
+    return None

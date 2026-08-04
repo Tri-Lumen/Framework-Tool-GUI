@@ -35,8 +35,13 @@ when a release is published and attaches the artifacts to it.
 
 ```
 framework_gui.py   Tk app — UI, command execution, the 14 "Tools" workflows
-parsers.py         Regex parsers + device detection. No tkinter import, so it
-                   is unit-testable without a display
+parsers.py         Regex parsers + device detection
+power.py           CPU power-limit (TDP) backends: RyzenAdj, Linux powercap,
+                   Windows powercfg
+deps.py            Registry of helper tools and how to install each one
+drivers.py         Framework driver-page catalog + download scraping
+                   (none of the four import tkinter, so all are unit-testable
+                   without a display)
 tests/             Parser tests, GUI smoke tests, packaging checks
 windows/           PyInstaller build, Inno Setup script, install/uninstall
 flatpak/           Manifest, .desktop, launcher, icon, its own README
@@ -107,6 +112,41 @@ host's `framework_tool` via `flatpak-spawn --host`
 (`--talk-name=org.freedesktop.Flatpak` permission). Install `framework_tool`
 on every host.
 
+## Beyond framework_tool
+
+`framework_tool` talks to the embedded controller, which does not own
+everything worth changing on these machines. Three tabs drive other tools:
+
+**Power (TDP)** — sustained and boost power limits. The EC cannot set these,
+so the app picks a backend from the CPU and OS:
+
+| Backend | CPU | OS | Sets |
+| --- | --- | --- | --- |
+| [RyzenAdj](https://github.com/FlyGoat/RyzenAdj) | AMD | Windows, Linux | STAPM / PPT fast / PPT slow — real watts |
+| Linux powercap (RAPL) | Intel, some AMD | Linux | Kernel long/short power limits — real watts |
+| `powercfg` | any | Windows | Max processor state % — a frequency cap, not a wattage |
+
+Limits set here are **volatile**: a reboot clears them, and sleep or an
+AC/battery transition often does too. Re-applying automatically would need a
+service or scheduled task, which this project deliberately does not have —
+the tab says so and you click Apply again. ARM has no equivalent tool to
+shell out to, and the tab says that too rather than showing dead controls.
+
+**Setup** — detects the helper tools and installs them. Every install shows
+the exact command (or the page it will open) and waits for you to confirm;
+nothing installs silently. Where a distro genuinely has no package — RyzenAdj
+is not in Debian, Ubuntu or Fedora — you get upstream's instructions instead
+of a package-manager command that would only fail confusingly. Downloaded
+helpers go in a per-user tools directory, never into the app's own install
+directory.
+
+**Drivers** — maps the detected board to its Framework Knowledge Base page,
+scrapes the driver-bundle link off it, and downloads it to your Downloads
+folder. If the page can't be fetched or its markup has changed, it opens the
+page in your browser rather than failing. The app never runs an installer for
+you. There is also a list of vendor driver pages for parts the bundle does
+not cover — a replacement Wi-Fi card, a Graphics Module, an aftermarket GPU.
+
 ## Device detection
 
 On launch (and via the "Rescan device" button) the GUI runs `--versions`
@@ -119,7 +159,8 @@ string is not recognized, every control is shown rather than guessing.
 ## Background footprint
 
 None. No services, timers, tray icons, or autostart entries. A process is
-spawned per button press and exits when the command finishes.
+spawned per button press and exits when the command finishes. This is why
+power limits do not survive a reboot — see the Power tab above.
 
 ## Running from source / development
 

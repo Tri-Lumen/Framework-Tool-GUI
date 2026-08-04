@@ -11,12 +11,20 @@ works.
 A Tkinter GUI for [framework_tool](https://github.com/FrameworkComputer/framework-system),
 the official CLI for controlling Framework laptop/desktop firmware (fans,
 battery charge limits, keyboard backlight, USB-C PD ports, etc). The GUI
-shells out to the CLI and parses its text output — it has no other way to
-talk to the hardware.
+shells out to the CLI and parses its text output — it has no direct hardware
+access of any kind.
+
+It has since grown past framework_tool, by explicit request, into three more
+tabs that shell out to *other* programs: **Power (TDP)** (RyzenAdj, Linux
+powercap, Windows powercfg), **Setup** (installing those helpers), and
+**Drivers** (Framework's driver bundles and vendor drivers for swapped-in
+parts). Same shape as the rest of the app — run a program, parse its output
+best-effort — and the same rule: the app never touches hardware itself.
 
 Two distribution targets only, by explicit request: a Windows exe/installer
 and a Linux Flatpak. (An earlier Linux "script installer" was built and then
-deliberately dropped — don't re-add it unless asked.)
+deliberately dropped — don't re-add it unless asked.) Releases are published
+by GitHub Actions; see "Releasing" below.
 
 Hard requirement carried through the whole project: **no background
 processes.** No services, timers, tray icons, or autostart entries on either
@@ -29,7 +37,16 @@ when that command finishes.
 framework_gui.py      Tk app — UI, command execution, the 14 "Tools" workflows
 parsers.py             Pure-Python: regex parsers + detect_model(). No tkinter
                         import, so it's unit-testable without a display.
+power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
+                        powercfg. Builds commands, does no I/O of its own.
+deps.py                Helper-tool registry: detect, and build install plans.
+drivers.py             Framework driver-page catalog, link scraping, download.
+                        (all three follow parsers.py's rules: stdlib only, no
+                        tkinter, I/O injected as arguments)
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
+tests/test_power.py    Unit tests for power.py — unit conversions especially.
+tests/test_deps.py     Unit tests for deps.py — every install plan path.
+tests/test_drivers.py  Unit tests for drivers.py — board matching + scraping.
 tests/test_smoke_gui.py Full-app tests: real App(), real mainloop(), stub CLI
                         binary on PATH, assert on which buttons survive gating.
                         Needs a display (xvfb-run on headless Linux); skips
@@ -103,6 +120,38 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   already root) and/or `flatpak-spawn --host` (when running inside the
   Flatpak sandbox — the sandbox can't reach the EC at all, so this is a
   deliberate, unavoidable sandbox hole; see `flatpak/README.md`).
+
+- **Two command paths, on purpose.** `_build_cmd`/`_exec` are
+  framework_tool-only: they put the binary from the top bar in front of the
+  args. Everything on the Power/Setup/Drivers tabs runs a *different*
+  program, so it goes through `_build_external`/`_exec_external`, which
+  applies the same pkexec and flatpak-spawn wrapping with no binary
+  prefixed. Don't route helper tools through `run()` — you'd get
+  `framework_tool ryzenadj --stapm-limit=…`.
+
+- **Everything beyond framework_tool is "shell out to someone else".** The
+  app has no direct hardware access anywhere, so the three newer tabs are
+  the same shape as the old ones: build a command in a pure module, run it
+  in a worker thread, parse best-effort, fall back to raw output.
+  - `power.py` picks a backend from (CPU vendor, OS, what's installed) and
+    builds the command. **Watch the units**: RyzenAdj takes milliwatts and
+    RAPL takes microwatts; the UI is in watts and `check_watts()` is the
+    single conversion gate. `powercfg` is deliberately in the table even
+    though it caps *frequency* rather than wattage — it needs nothing
+    installed, so it's the honest fallback, and `sets_watts: False` is what
+    stops the UI from labelling it as watts.
+  - `deps.py` never returns "nothing I can do". Every dependency yields an
+    install plan; where no package exists (RyzenAdj outside the AUR) the
+    plan degrades to `KIND_MANUAL` with upstream's page. Emitting an
+    `apt-get install ryzenadj` that cannot work would be worse than saying
+    so. Nothing installs without a confirm dialog showing the exact command.
+  - `drivers.py` matches the board string from `--versions` against a
+    catalog ordered **most specific first** ("Laptop 13 Pro" must precede
+    the entry that matches any "Ryzen AI 300"). Unmatched boards fall back
+    to the Knowledge Base index, never to nothing. Scraping a bundle link
+    out of the page is best-effort; on any failure the GUI opens the page in
+    a browser. Framework's URLs live only in `CATALOG`/`EXTRA`, so fixing a
+    dead link is a one-line change.
 
 - **Blocked commands** (`App.BLOCKED` in `framework_gui.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
@@ -189,6 +238,21 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
    main thread with no mainloop running. Keep that teardown. (This is
    test-harness-only: real users get one App per process.)
 
+8. **Re-packing a widget moves it to the end of the pack order.**
+   `_build_tabs()` destroys and rebuilds the notebook on every rescan. When
+   it packed the new notebook straight into the window, the tabs landed
+   *below* the output pane and the status bar the moment the first device
+   scan finished — the app looked fine until detection returned, which is
+   why it survived so long. The notebook now lives in a `tabs_holder` frame
+   packed exactly once in `__init__`. Anything else rebuilt at runtime needs
+   the same treatment.
+
+9. **Screenshots of a Tk app under Xvfb lie if you only call
+   `update_idletasks()`.** Half the widgets come out blank — the geometry is
+   right, the paint hasn't happened. `update()` plus a short `after()` delay
+   before grabbing gives a true picture. Worth knowing before "fixing" a
+   layout bug that isn't there.
+
 ## Not yet verified (be skeptical, not confident)
 
 - **Never run against real `framework_tool` or real hardware.** All
@@ -229,21 +293,41 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   `/releases/latest/download/...` links in the README all go live the first
   time a release is published. A `workflow_dispatch` run exercises
   everything except the upload.
+- **No power-limit backend has ever run.** `power.py`'s command builders are
+  unit-tested, but no `ryzenadj`, no RAPL write and no `powercfg` call has
+  been executed against real silicon from this app. The RyzenAdj `-i` parser
+  was written against upstream's README sample, exactly the same
+  "matched the docs, not your version" caveat as the framework_tool parsers.
+  Sanity-check on real hardware by applying a limit and reading it back —
+  the Power tab does that read-back automatically after Apply.
+- **No driver page has ever been scraped successfully.** `find_downloads()`
+  is tested against synthetic markup. Framework's Knowledge Base returned
+  403 to a scripted fetch during development, so the browser fallback may
+  turn out to be the *normal* path rather than the exception. If it is,
+  consider dropping the scrape and just opening the page.
+- **The Framework Knowledge Base URLs in `drivers.py` were collected from
+  search results, not by loading each page.** They are the right shape and
+  the right articles, but a moved article shows up as a 404 in someone's
+  browser. Worth one pass with a real browser to confirm all twelve.
 - The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
   crude placeholder, not real artwork.
 
 ## Deliberately out of scope
 
-- **TDP/power-limit control.** Discussed explicitly and declined:
-  `framework_tool` talks to the EC, and TDP (PL1/PL2 on Intel, STAPM/PPT on
-  AMD) is controlled by the SoC, which the EC doesn't own. Nothing in the
-  upstream CLI touches it. Would require shelling out to a *second* tool
-  (`ryzenadj` on AMD, RAPL/ThrottleStop on Intel) and has its own
-  complications (AMD-only via ryzenadj, values reset on reboot unless you
-  add a persistence mechanism, which itself would need a background
-  service/scheduled task — in tension with the no-background-processes
-  requirement). If this comes back, treat it as a separate feature
-  decision, not an oversight to quietly fix.
+- **Persisting power limits across reboots.** The limits the Power tab sets
+  are volatile — that is a property of the SoC registers, not a bug. Making
+  them stick needs something to re-apply them at boot and after resume: a
+  systemd unit, a scheduled task, a tray agent. All of those are background
+  processes, which is the one requirement this project has never bent. The
+  UI states the limitation instead. If this comes back, it is a decision to
+  drop the no-background-processes rule, not a small feature.
+- **Driving ThrottleStop.** It has no command line. The Setup tab can point
+  at it and the Drivers tab can link it, but nothing here can script it. On
+  Intel, `powercfg` (Windows) and RAPL (Linux) are what the app can actually
+  drive.
+- **Running downloaded installers.** The Drivers tab downloads a bundle and
+  stops there. Executing a vendor installer unattended, as an elevated
+  process, is not something this app should do on a user's behalf.
 
 ## Releasing
 
@@ -279,4 +363,10 @@ especially the Flatpak job, which had never been run when it was written.
    compiles, nothing yet proves it installs.
 4. Same for the script installers (`install-exe.cmd`) from an SMB share,
    including the uninstaller they now drop in `%LOCALAPPDATA%\FrameworkGUI`.
-5. Real app icon for the Flatpak `.desktop`/icon file.
+5. Apply a power limit on a real AMD Framework with RyzenAdj installed and
+   confirm the read-back matches — then do the same for RAPL on Intel Linux
+   and `powercfg` on Windows.
+6. Open all twelve Knowledge Base URLs in `drivers.py` in a browser, and see
+   whether "Find downloads on that page" scrapes anything or always falls
+   back to opening the browser.
+7. Real app icon for the Flatpak `.desktop`/icon file.

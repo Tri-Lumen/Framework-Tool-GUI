@@ -20,8 +20,10 @@ try {
     $Shortcut = Join-Path $GroupDir "Framework System GUI.lnk"
     $UninstLnk = Join-Path $GroupDir "Uninstall Framework System GUI.lnk"
     $RegKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrameworkGUI"
-    # Both files are required: framework_gui.py imports parsers.py.
-    $SrcFiles = @("framework_gui.py", "parsers.py") | ForEach-Object { Join-Path $Here "..\$_" }
+    # All of these are required: framework_gui.py imports the rest, and a
+    # missing one only shows up as ModuleNotFoundError at launch.
+    $SrcFiles = @("framework_gui.py", "parsers.py", "power.py", "deps.py",
+                  "drivers.py") | ForEach-Object { Join-Path $Here "..\$_" }
 
     Write-Host "== Framework System GUI installer =="
     Write-Host "Source: $Here"

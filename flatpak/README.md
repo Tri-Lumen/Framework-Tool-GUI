@@ -63,6 +63,15 @@ flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
   `flatpak-spawn --host` - that is what the
   `--talk-name=org.freedesktop.Flatpak` permission in the manifest is for.
   This is an intentional sandbox escape; without it the app is useless.
+- `--share=network` is in the manifest for the Drivers and Setup tabs, which
+  fetch Framework's download pages, driver bundles and helper-tool releases
+  over HTTPS. Drop it if you never want the app talking to the internet;
+  those two tabs then fail on every fetch and fall back to opening links in
+  the browser.
+- The Setup tab's installs run on the *host* (same `flatpak-spawn --host`
+  path as every other command, plus pkexec), so a helper installed from here
+  lands in the host's package manager, not in the sandbox. That is what you
+  want: the sandbox cannot reach the EC or the SoC either way.
 - Elevation uses the host's pkexec, so expect a polkit password prompt per
   command unless you install a polkit policy with `auth_admin_keep` for the
   framework_tool path on the host.

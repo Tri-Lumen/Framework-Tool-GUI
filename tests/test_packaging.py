@@ -32,7 +32,9 @@ class TestAppModules(unittest.TestCase):
 
     def test_expected_modules_present(self):
         # A sanity anchor: if this changes, the rest of the file needs a look.
-        self.assertEqual(APP_MODULES, ["framework_gui.py", "parsers.py"])
+        self.assertEqual(APP_MODULES, ["deps.py", "drivers.py",
+                                       "framework_gui.py", "parsers.py",
+                                       "power.py"])
 
 
 class TestWindowsPackaging(unittest.TestCase):

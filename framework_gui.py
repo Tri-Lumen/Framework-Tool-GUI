@@ -21,11 +21,23 @@ on Desktop, battery/keyboard-light/fingerprint controls only on laptops).
 If detection fails or the model string isn't recognized, every control is
 shown rather than guessing what to hide.
 
+Three tabs drive tools *other* than framework_tool, because the EC does not
+own everything a user wants to change:
+
+  Power    CPU power limits (TDP). framework_tool cannot set these — the
+           SoC owns them — so this shells out to RyzenAdj, the Linux
+           powercap sysfs, or Windows' own powercfg. See power.py.
+  Setup    Detects and installs those helper tools. See deps.py.
+  Drivers  Framework's driver bundle for the detected system, plus vendor
+           drivers for parts the user swapped in. See drivers.py.
+
 Deliberately excluded: --flash-* / --force. Use the CLI for those.
 """
 
 import datetime
+import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -33,8 +45,12 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, scrolledtext, ttk
 
+import deps
+import drivers
+import power
 from parsers import (
     RE_AC,
     RE_CHG_A,
@@ -75,6 +91,42 @@ def is_root():
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def detect_cpu():
+    """CPU vendor/name for the power tab. Safe to call from a worker thread.
+
+    Inside the Flatpak sandbox /proc/cpuinfo is still the host's CPU, so no
+    flatpak-spawn round trip is needed here.
+    """
+    cpuinfo = ""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+            cpuinfo = fh.read(20000)
+    except OSError:
+        pass
+    ident = os.environ.get("PROCESSOR_IDENTIFIER", "")
+    return {
+        "vendor": power.detect_vendor(cpuinfo, ident, platform.machine()),
+        "label": power.cpu_label(cpuinfo, ident),
+    }
+
+
+def rapl_zones():
+    """Names of the kernel's powercap zones, or [] where there is no sysfs."""
+    try:
+        return os.listdir(power.RAPL_ROOT)
+    except OSError:
+        return []
+
+
+def read_text_file(path):
+    """Read a small sysfs file; '' when it isn't readable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read(200)
+    except OSError:
+        return ""
+
+
 # ---------- output parsers now live in parsers.py ----------
 
 
@@ -106,6 +158,16 @@ class App(tk.Tk):
             "has_expansion_bay": True, "has_rgbkbd": True,
         }
         self.detected_var = tk.StringVar(value="Detecting device…")
+
+        # CPU vendor drives which power-limit backends and which helper
+        # tools are worth offering. Unknown until the first scan, and
+        # "unknown" keeps showing everything rather than hiding it.
+        self.cpu = {"vendor": power.VENDOR_UNKNOWN, "label": ""}
+        # Power limits read back before this session changed them, so
+        # "Restore previous" is possible without a reboot. Same instinct as
+        # the fan/backlight tools, which always restore what they found.
+        self._power_saved = {}
+        self._driver_links = []
 
         self._build_topbar()
         self._build_tabs()
@@ -144,15 +206,26 @@ class App(tk.Tk):
                    command=self._rescan).pack(side="right")
 
     def _build_tabs(self):
+        # The notebook is rebuilt from scratch on every rescan, so it lives
+        # inside a holder frame that is packed exactly once. Packing the
+        # notebook directly into the window instead would re-append it to
+        # the end of the pack order each time, dropping the tabs below the
+        # output pane and the status bar after the first scan.
+        if not hasattr(self, "tabs_holder"):
+            self.tabs_holder = ttk.Frame(self)
+            self.tabs_holder.pack(fill="x", padx=8)
         if hasattr(self, "nb"):
             self.nb.destroy()
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="x", padx=8)
+        self.nb = ttk.Notebook(self.tabs_holder)
+        self.nb.pack(fill="both", expand=True)
         self._tab_tools()
         self._tab_info()
         self._tab_fans()
         self._tab_settings()
+        self._tab_power()
         self._tab_ports()
+        self._tab_drivers()
+        self._tab_setup()
         self._tab_console()
 
     # ---- device detection ----
@@ -173,10 +246,11 @@ class App(tk.Tk):
             caps.update(model="Unknown (detection failed)", detected=False)
         else:
             caps = detect_model(out)
-        self.after(0, self._apply_detection, caps)
+        self.after(0, self._apply_detection, caps, detect_cpu())
 
-    def _apply_detection(self, caps):
+    def _apply_detection(self, caps, cpu):
         self.caps = caps
+        self.cpu = cpu
         self._busy = False
         if caps["detected"]:
             self.detected_var.set(f"Detected: {caps['model']}")
@@ -413,6 +487,498 @@ class App(tk.Tk):
     def _clear_rgb_all(self):
         self.run(["--rgbkbd", "0"] + ["0"] * 8)
 
+    # ---- Power (TDP) ----
+
+    def _tab_power(self):
+        f = ttk.Frame(self.nb, padding=8)
+        self.nb.add(f, text="Power (TDP)")
+        vendor = self.cpu.get("vendor", power.VENDOR_UNKNOWN)
+        backends = power.available_backends(
+            vendor, "windows" if IS_WINDOWS else "linux",
+            have=lambda dep_id: bool(self._which_dep(dep_id)),
+            rapl_present=bool(power.rapl_constraint_files(rapl_zones())))
+        self.power_backend = backends[0] if backends else None
+
+        cpu_text = self.cpu.get("label") or f"{vendor.upper()} CPU"
+        ttk.Label(f, text=f"CPU: {cpu_text}").grid(
+            row=0, column=0, columnspan=6, sticky="w")
+
+        if not self.power_backend:
+            ttk.Label(
+                f, foreground="#a00", wraplength=780, justify="left",
+                text=self._no_backend_reason(vendor)
+            ).grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
+            ttk.Button(f, text="Open the Setup tab",
+                       command=self._select_tab("Setup")
+                       ).grid(row=2, column=0, sticky="w", pady=8)
+            return
+
+        meta = power.BACKENDS[self.power_backend]
+        ttk.Label(f, text=f"Backend: {meta['label']}").grid(
+            row=1, column=0, columnspan=6, sticky="w")
+        ttk.Label(f, text=meta["note"], foreground="#555", wraplength=780,
+                  justify="left").grid(row=2, column=0, columnspan=6,
+                                       sticky="w", pady=(0, 8))
+
+        r = 3
+        if meta["sets_watts"]:
+            ttk.Label(f, text="Sustained limit (W)").grid(row=r, column=0, sticky="w")
+            self.tdp_sustained = tk.StringVar(value="25")
+            ttk.Entry(f, textvariable=self.tdp_sustained, width=6).grid(
+                row=r, column=1, sticky="w")
+            ttk.Label(f, text="Boost limit (W)").grid(row=r, column=2,
+                                                      sticky="w", padx=(12, 0))
+            self.tdp_boost = tk.StringVar(value="35")
+            ttk.Entry(f, textvariable=self.tdp_boost, width=6).grid(
+                row=r, column=3, sticky="w")
+            if self.power_backend == "ryzenadj":
+                ttk.Label(f, text="Temp limit (C)").grid(row=r, column=4,
+                                                         sticky="w", padx=(12, 0))
+                self.tdp_tctl = tk.StringVar(value="")
+                ttk.Entry(f, textvariable=self.tdp_tctl, width=6).grid(
+                    row=r, column=5, sticky="w")
+            r += 1
+
+            presets = ttk.Frame(f)
+            presets.grid(row=r, column=0, columnspan=6, sticky="w", pady=(8, 0))
+            ttk.Label(presets, text="Presets:").pack(side="left", padx=(0, 6))
+            # Fill the fields only — applying is always a separate, deliberate
+            # click, because these numbers are a guess at what the machine
+            # likes, not a reading from it.
+            for label, sustained, boost in (("Quiet 15 W", 15, 20),
+                                            ("Balanced 25 W", 25, 35),
+                                            ("Performance 45 W", 45, 60)):
+                ttk.Button(presets, text=label,
+                           command=self._fill_tdp(sustained, boost)
+                           ).pack(side="left", padx=2)
+            r += 1
+        else:
+            ttk.Label(f, text="Max processor state (%)").grid(row=r, column=0,
+                                                              sticky="w")
+            self.tdp_percent = tk.IntVar(value=100)
+            ttk.Scale(f, from_=power.MIN_PERCENT, to=power.MAX_PERCENT,
+                      variable=self.tdp_percent,
+                      command=lambda v: self.tdp_percent.set(int(float(v)))
+                      ).grid(row=r, column=1, columnspan=3, sticky="ew", padx=6)
+            ttk.Label(f, textvariable=self.tdp_percent, width=4).grid(
+                row=r, column=4, sticky="w")
+            r += 1
+
+        actions = ttk.Frame(f)
+        actions.grid(row=r, column=0, columnspan=6, sticky="w", pady=(12, 0))
+        ttk.Button(actions, text="Apply limits",
+                   command=self._apply_power).pack(side="left")
+        ttk.Button(actions, text="Read current",
+                   command=self._read_power).pack(side="left", padx=6)
+        ttk.Button(actions, text="Restore previous",
+                   command=self._restore_power).pack(side="left")
+        r += 1
+
+        ttk.Label(
+            f, foreground="#a00", wraplength=780, justify="left",
+            text="Power limits set here are volatile: a reboot clears them, "
+                 "and sleep or an AC/battery change often does too. This app "
+                 "starts no background service to re-apply them — reopen this "
+                 "tab and click Apply again. Pushing limits above what the "
+                 "cooling can carry can destabilise the machine; if it locks "
+                 "up, reboot and it comes back at stock."
+        ).grid(row=r, column=0, columnspan=6, sticky="w", pady=(12, 0))
+        f.columnconfigure(1, weight=1)
+
+    def _no_backend_reason(self, vendor):
+        if vendor == power.VENDOR_AMD:
+            return ("No power-limit backend available. RyzenAdj is not "
+                    "installed — install it from the Setup tab, then rescan.")
+        if vendor == power.VENDOR_INTEL:
+            if IS_LINUX:
+                return ("No power-limit backend available. This kernel is not "
+                        "exposing RAPL powercap zones under "
+                        f"{power.RAPL_ROOT}.")
+            return ("No power-limit backend available on this machine.")
+        if vendor == power.VENDOR_ARM:
+            return ("ARM CPUs have no power-limit tool this app can drive — "
+                    "there is no RyzenAdj or RAPL equivalent to shell out to.")
+        return ("CPU vendor could not be determined, so no power-limit "
+                "backend was selected. Rescan the device, or check the "
+                "Setup tab for what is installed.")
+
+    def _fill_tdp(self, sustained, boost):
+        def fill():
+            self.tdp_sustained.set(str(sustained))
+            self.tdp_boost.set(str(boost))
+        return fill
+
+    def _select_tab(self, text):
+        def select():
+            for tab_id in self.nb.tabs():
+                if self.nb.tab(tab_id, "text") == text:
+                    self.nb.select(tab_id)
+                    return
+        return select
+
+    def _apply_power(self):
+        backend = self.power_backend
+        try:
+            if backend == "ryzenadj":
+                tctl = getattr(self, "tdp_tctl", None)
+                tctl = (tctl.get().strip() or None) if tctl else None
+                args = power.ryzenadj_args(self.tdp_sustained.get(),
+                                           self.tdp_boost.get(), tctl)
+            elif backend == "rapl":
+                sustained = power.check_watts(self.tdp_sustained.get())
+                boost = power.check_watts(self.tdp_boost.get())
+            else:
+                percent = power.check_percent(self.tdp_percent.get())
+        except power.PowerError as e:
+            messagebox.showerror("Not applied", str(e))
+            return
+
+        if backend == "ryzenadj":
+            binary = self._which_dep("ryzenadj")
+            self.run_tool(lambda: self._power_tool_ryzenadj(binary, args))
+        elif backend == "rapl":
+            self.run_tool(lambda: self._power_tool_rapl(sustained, boost))
+        else:
+            self.run_tool(lambda: self._power_tool_powercfg(percent))
+
+    def _power_tool_ryzenadj(self, binary, args):
+        self._append("=== Applying AMD power limits (RyzenAdj) ===\n")
+        rc, out = self._exec_external([binary] + args)
+        self._append(out.strip() + "\n")
+        if rc != 0:
+            self._append(f"RyzenAdj exited {rc} — limits may not have been "
+                         f"applied.\n")
+            return
+        self._append("\nReading back what stuck:\n")
+        rc, info = self._exec_external([binary, "-i"])
+        table = power.parse_ryzenadj_info(info)
+        if table:
+            for key in ("STAPM LIMIT", "PPT LIMIT FAST", "PPT LIMIT SLOW",
+                        "THM LIMIT CORE"):
+                if key in table:
+                    self._append(f"  {key}: {table[key]:.1f}\n")
+        else:
+            self._append(info.strip() + "\n")
+
+    def _power_tool_rapl(self, sustained, boost):
+        self._append("=== Applying RAPL power limits ===\n")
+        zones = power.rapl_constraint_files(rapl_zones())
+        if not zones:
+            self._append(f"No powercap package zones under {power.RAPL_ROOT}.\n")
+            return
+        for zone in zones:
+            for name, watts in (("long", sustained), ("short", boost)):
+                path = zone[name]
+                if not os.path.exists(path):
+                    continue
+                self._power_saved.setdefault(path, read_text_file(path))
+                rc, out = self._exec_external(power.rapl_write_cmd(path, watts))
+                status = "ok" if rc == 0 else f"failed (exit {rc}) {out.strip()}"
+                self._append(f"  {zone['zone']} {name} -> {watts} W: {status}\n")
+        self._append("\n")
+        self._read_rapl()
+
+    def _power_tool_powercfg(self, percent):
+        self._append(f"=== Capping maximum processor state at {percent}% ===\n")
+        if not self._power_saved.get("powercfg"):
+            rc, out = self._exec_external(power.powercfg_query_cmd(), elevate=False)
+            current = power.parse_powercfg_percent(out)
+            if current is not None:
+                self._power_saved["powercfg"] = current
+        for cmd in power.powercfg_cmds(percent):
+            rc, out = self._exec_external(cmd, elevate=False)
+            if rc != 0:
+                self._append(f"  {' '.join(cmd)} -> exit {rc}\n{out.strip()}\n")
+                return
+        self._append("Applied to both the AC and battery profiles of the "
+                     "active power scheme.\n")
+
+    def _read_power(self):
+        backend = self.power_backend
+        if backend == "ryzenadj":
+            binary = self._which_dep("ryzenadj")
+            self.run_tool(lambda: self._read_ryzenadj(binary))
+        elif backend == "rapl":
+            self.run_tool(self._read_rapl)
+        else:
+            self.run_tool(self._read_powercfg)
+
+    def _read_ryzenadj(self, binary):
+        self._append("=== Current AMD power limits ===\n")
+        rc, out = self._exec_external([binary, "-i"])
+        table = power.parse_ryzenadj_info(out)
+        # Same fallback rule as every framework_tool parser here: show the
+        # raw text rather than nothing when the format has moved on.
+        self._append("".join(f"  {k}: {v}\n" for k, v in table.items())
+                     if table else out.strip() + "\n")
+
+    def _read_rapl(self):
+        self._append("=== Current RAPL limits ===\n")
+        for zone in power.rapl_constraint_files(rapl_zones()):
+            for name in ("long", "short"):
+                watts = power.parse_rapl_uw(read_text_file(zone[name]))
+                if watts is not None:
+                    self._append(f"  {zone['zone']} {name}: {watts:.1f} W\n")
+
+    def _read_powercfg(self):
+        self._append("=== Current maximum processor state ===\n")
+        rc, out = self._exec_external(power.powercfg_query_cmd(), elevate=False)
+        percent = power.parse_powercfg_percent(out)
+        self._append(f"  AC: {percent}%\n" if percent is not None
+                     else out.strip() + "\n")
+
+    def _restore_power(self):
+        if not self._power_saved:
+            messagebox.showinfo(
+                "Nothing saved",
+                "No limits have been changed in this session.\n\n"
+                "RyzenAdj has no 'restore defaults' command — a reboot puts "
+                "the SoC back to stock.")
+            return
+        self.run_tool(self._restore_power_tool)
+
+    def _restore_power_tool(self):
+        self._append("=== Restoring the limits found at startup ===\n")
+        for key, value in list(self._power_saved.items()):
+            if key == "powercfg":
+                for cmd in power.powercfg_cmds(value):
+                    self._exec_external(cmd, elevate=False)
+                self._append(f"  max processor state -> {value}%\n")
+                continue
+            watts = power.parse_rapl_uw(value)
+            if watts is None:
+                continue
+            rc, _out = self._exec_external(power.rapl_write_cmd(key, watts))
+            self._append(f"  {key} -> {watts:.1f} W "
+                         f"{'ok' if rc == 0 else 'failed'}\n")
+        self._power_saved.clear()
+
+    # ---- Setup (helper tools) ----
+
+    def _tab_setup(self):
+        f = ttk.Frame(self.nb, padding=8)
+        self.nb.add(f, text="Setup")
+        os_name = "windows" if IS_WINDOWS else "linux"
+        manager = deps.linux_manager(shutil.which) if IS_LINUX else None
+
+        ttk.Label(
+            f, wraplength=780, justify="left", foreground="#555",
+            text="This app only ever runs other programs. These are the ones "
+                 "it can drive; nothing is installed without you clicking "
+                 "Install and confirming the exact command first."
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        r = 1
+        for dep in deps.relevant(os_name, self.cpu.get("vendor")):
+            found = deps.find(dep, self._which)
+            ttk.Label(f, text=dep["name"], font=("TkDefaultFont", 10, "bold")
+                      ).grid(row=r, column=0, sticky="w")
+            ttk.Label(f, text=found or "not found",
+                      foreground="#070" if found else "#a00"
+                      ).grid(row=r, column=1, sticky="w", padx=8)
+            plan = deps.install_plan(dep, os_name, manager)
+            ttk.Button(f, text="Install" if not found else "Reinstall",
+                       command=self._install_dep(dep, plan)
+                       ).grid(row=r, column=2, padx=2)
+            ttk.Button(f, text="Homepage",
+                       command=self._open_url(dep["homepage"])
+                       ).grid(row=r, column=3, padx=2)
+            r += 1
+            ttk.Label(f, text=dep["why"], foreground="#555", wraplength=760,
+                      justify="left").grid(row=r, column=0, columnspan=4,
+                                           sticky="w", pady=(0, 10))
+            r += 1
+
+        ttk.Button(f, text="Re-check what is installed", command=self._rescan
+                   ).grid(row=r, column=0, sticky="w", pady=(4, 0))
+        f.columnconfigure(1, weight=1)
+
+    def _install_dep(self, dep, plan):
+        def install():
+            note = f"\n\nNote: {plan['note']}" if plan.get("note") else ""
+            if plan["kind"] == deps.KIND_MANUAL:
+                if messagebox.askyesno(
+                        f"Install {dep['name']}",
+                        f"{dep['name']} has no automated install here.\n\n"
+                        f"Open {plan['url']} in your browser?{note}"):
+                    webbrowser.open(plan["url"])
+                return
+            if not messagebox.askyesno(
+                    f"Install {dep['name']}",
+                    f"This will run:\n\n  {plan['summary']}{note}\n\nProceed?"):
+                return
+            if plan["kind"] == deps.KIND_DOWNLOAD:
+                self.run_tool(lambda: self._download_dep(dep, plan))
+            else:
+                self.run_tool(lambda: self._package_install(dep, plan))
+        return install
+
+    def _package_install(self, dep, plan):
+        self._append(f"=== Installing {dep['name']} ===\n$ {plan['summary']}\n\n")
+        rc, out = self._exec_external(plan["cmd"], timeout=900)
+        self._append(out.strip() + "\n")
+        self._append(f"\nExit {rc}. " + ("Installed.\n" if rc == 0 else
+                                         "Install failed — see above.\n"))
+
+    def _download_dep(self, dep, plan):
+        """Fetch a helper's latest release from GitHub into the tools dir."""
+        self._append(f"=== Downloading {dep['name']} ===\n")
+        dest = deps.tools_dir()
+        try:
+            body = drivers.fetch_text(deps.github_latest_api(plan["repo"]),
+                                      timeout=30)
+            release = json.loads(body)
+            asset = deps.pick_asset(release.get("assets"), plan["asset_match"])
+            if not asset:
+                raise RuntimeError(
+                    f"No asset matching '{plan['asset_match']}' in "
+                    f"{release.get('tag_name', 'the latest release')}")
+            self._append(f"{release.get('tag_name', '?')}: "
+                         f"{asset['name']}\n")
+            archive = drivers.download_file(
+                asset["browser_download_url"], dest,
+                progress=self._download_progress)
+            self._append(f"Downloaded to {archive}\n")
+            if archive.lower().endswith(".zip"):
+                deps.extract_zip(archive, dest)
+                self._append(f"Unpacked into {dest}\n")
+            binary = plan.get("binary")
+            found = deps.find_in_tree(dest, binary) if binary else None
+            self._append(f"{dep['name']} is at {found}\n" if found else
+                         f"Unpacked, but {binary} was not found in {dest}.\n")
+        except Exception as e:  # noqa: BLE001
+            # Any failure ends the same way: hand over the page and let the
+            # user do it by hand, rather than leaving them stuck.
+            self._append(f"Automatic download failed: {e}\n\n"
+                         f"Open {dep['homepage']} and install it manually.\n")
+
+    def _download_progress(self, done, total):
+        if total:
+            self.set_status(f"Downloading… {done * 100 // total}% "
+                            f"({done // 1024 // 1024} of "
+                            f"{total // 1024 // 1024} MB)")
+        else:
+            self.set_status(f"Downloading… {done // 1024 // 1024} MB")
+
+    # ---- Drivers ----
+
+    def _tab_drivers(self):
+        f = ttk.Frame(self.nb, padding=8)
+        self.nb.add(f, text="Drivers")
+        entry = drivers.resource_for(self.caps.get("model", ""))
+        self._driver_entry = entry
+
+        ttk.Label(f, text=entry["label"], font=("TkDefaultFont", 10, "bold")
+                  ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(
+            f, foreground="#555", wraplength=780, justify="left",
+            text=("Framework's driver bundle and BIOS for this system."
+                  if entry["exact"] else
+                  "This system was not matched to a specific Framework "
+                  "download page, so this is the index of all of them.")
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        ttk.Button(f, text="Open download page",
+                   command=self._open_url(entry["url"])
+                   ).grid(row=2, column=0, sticky="w")
+        ttk.Button(f, text="Find downloads on that page",
+                   command=self._find_driver_downloads
+                   ).grid(row=2, column=1, sticky="w", padx=6)
+
+        self.driver_choice = tk.StringVar()
+        self.driver_combo = ttk.Combobox(f, textvariable=self.driver_choice,
+                                         state="disabled", width=52)
+        self.driver_combo.grid(row=3, column=0, columnspan=3, sticky="ew",
+                               pady=(8, 0))
+        self.driver_get_btn = ttk.Button(f, text="Download selected",
+                                         state="disabled",
+                                         command=self._download_selected_driver)
+        self.driver_get_btn.grid(row=3, column=3, padx=4, pady=(8, 0))
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=4, column=0, columnspan=4, sticky="ew", pady=12)
+        ttk.Label(
+            f, text="Parts you added yourself", font=("TkDefaultFont", 10, "bold")
+        ).grid(row=5, column=0, columnspan=4, sticky="w")
+        ttk.Label(
+            f, foreground="#555", wraplength=780, justify="left",
+            text="The bundle above covers what the machine shipped with. A "
+                 "replacement Wi-Fi card, a Graphics Module or another "
+                 "swapped part gets its driver from the vendor."
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        r = 7
+        for extra in drivers.extras_for(self.cpu.get("vendor")):
+            ttk.Button(f, text=extra["label"], width=44,
+                       command=self._open_url(extra["url"])
+                       ).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+            ttk.Label(f, text=extra["why"], foreground="#555", wraplength=380,
+                      justify="left").grid(row=r, column=2, columnspan=2,
+                                           sticky="w", padx=8)
+            r += 1
+        f.columnconfigure(2, weight=1)
+
+    def _find_driver_downloads(self):
+        self.run_tool(self._find_driver_downloads_tool)
+
+    def _find_driver_downloads_tool(self):
+        url = self._driver_entry["url"]
+        self._append(f"=== Looking for downloads on ===\n{url}\n\n")
+        try:
+            html = drivers.fetch_text(url, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            self._append(f"Could not fetch the page: {e}\n\n"
+                         "Opening it in your browser instead.\n")
+            self.after(0, webbrowser.open, url)
+            return
+        links = drivers.find_downloads(html, url)
+        if not links:
+            self._append("No download links found in the page markup — "
+                         "Framework may have changed the page.\n\n"
+                         "Opening it in your browser instead.\n")
+            self.after(0, webbrowser.open, url)
+            return
+        for link in links:
+            self._append(f"  {link['name']}\n    {link['url']}\n")
+        self.after(0, self._fill_driver_choices, links)
+
+    def _fill_driver_choices(self, links):
+        self._driver_links = links
+        self.driver_combo.configure(values=[link["name"] for link in links],
+                                    state="readonly")
+        self.driver_choice.set(links[0]["name"])
+        self.driver_get_btn.configure(state="normal")
+        self.set_status(f"Found {len(links)} download(s).")
+
+    def _download_selected_driver(self):
+        name = self.driver_choice.get()
+        link = next((x for x in self._driver_links if x["name"] == name), None)
+        if not link:
+            return
+        if not messagebox.askyesno(
+                "Download driver package",
+                f"Download\n\n  {link['name']}\n\nfrom\n\n  {link['url']}\n\n"
+                f"into {drivers.download_dir()}?\n\n"
+                "This app downloads it only — you run the installer "
+                "yourself."):
+            return
+        self.run_tool(lambda: self._download_driver_tool(link))
+
+    def _download_driver_tool(self, link):
+        self._append(f"=== Downloading {link['name']} ===\n")
+        try:
+            path = drivers.download_file(link["url"], drivers.download_dir(),
+                                         timeout=600,
+                                         progress=self._download_progress)
+        except Exception as e:  # noqa: BLE001
+            self._append(f"Download failed: {e}\n")
+            return
+        self._append(f"Saved to {path}\n\nRun it yourself when you are ready; "
+                     "this app does not launch installers.\n")
+
+    def _open_url(self, url):
+        return lambda: webbrowser.open(url)
+
     def _tab_ports(self):
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Ports & Modules")
@@ -482,6 +1048,59 @@ class App(tk.Tk):
                 (("\n" + p.stderr) if p.stderr else "")
         except FileNotFoundError:
             return 127, f"Binary not found: {cmd[0]}"
+        except subprocess.TimeoutExpired:
+            return 124, "Command timed out."
+        except Exception as e:  # noqa: BLE001
+            return 1, f"Error: {e}"
+
+    # ---- other programs (helper tools, package managers, powercfg) ----
+    #
+    # framework_tool goes through _build_cmd/_exec, which prefix the binary
+    # from the top bar. Everything on the Power/Setup tabs is a *different*
+    # program, so it needs its own path: same pkexec and flatpak-spawn
+    # wrapping, no framework_tool binary in front of it.
+
+    def _which(self, name):
+        """shutil.which, extended with helpers this app downloaded itself."""
+        found = shutil.which(name)
+        if found:
+            return found
+        tools = deps.tools_dir()
+        if not os.path.isdir(tools):
+            return None
+        for candidate in (name, name + ".exe"):
+            direct = os.path.join(tools, candidate)
+            if os.path.isfile(direct):
+                return direct
+            nested = deps.find_in_tree(tools, candidate)
+            if nested:
+                return nested
+        return None
+
+    def _which_dep(self, dep_id):
+        try:
+            return deps.find(deps.get(dep_id), self._which)
+        except KeyError:
+            return None
+
+    def _build_external(self, cmd, elevate=True):
+        out = list(cmd)
+        if IS_LINUX and elevate and self.use_pkexec.get() and not is_root():
+            out = ["pkexec"] + out
+        if IN_FLATPAK:
+            out = ["flatpak-spawn", "--host"] + out
+        return out
+
+    def _exec_external(self, cmd, timeout=120, elevate=True):
+        """Synchronous — worker threads only. Returns (rc, text)."""
+        full = self._build_external(cmd, elevate=elevate)
+        try:
+            p = subprocess.run(full, capture_output=True, text=True,
+                               timeout=timeout)
+            return p.returncode, (p.stdout or "") + \
+                (("\n" + p.stderr) if p.stderr else "")
+        except FileNotFoundError:
+            return 127, f"Not found: {full[0]}"
         except subprocess.TimeoutExpired:
             return 124, "Command timed out."
         except Exception as e:  # noqa: BLE001
