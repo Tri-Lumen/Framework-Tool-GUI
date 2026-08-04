@@ -1,0 +1,85 @@
+app-id: io.github.frameworkgui.FrameworkGUI
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: framework-gui
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  # REQUIRED: lets the app run framework_tool (and pkexec) on the HOST via
+  # flatpak-spawn. EC/firmware access is impossible from inside the sandbox,
+  # so this permission is the whole point of the app. It is a deliberate
+  # sandbox hole - don't grant it to apps you don't trust.
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  # Tk needs X11; runs under XWayland on Wayland sessions.
+  - name: tcl
+    buildsystem: autotools
+    subdir: unix
+    post-install:
+      - chmod 755 /app/lib/libtcl8.6.so
+    sources:
+      - type: archive
+        url: https://github.com/tcltk/tcl/archive/refs/tags/core-8-6-14.tar.gz
+        sha256: 186a75c524ad20ef0cbcf159253bfcb0510b3b2e605c05d2d7abe93351fa5636
+    cleanup:
+      - /man
+
+  - name: tk
+    buildsystem: autotools
+    subdir: unix
+    config-opts:
+      - --with-tcl=/app/lib
+    post-install:
+      - chmod 755 /app/lib/libtk8.6.so
+    sources:
+      - type: archive
+        url: https://github.com/tcltk/tk/archive/refs/tags/core-8-6-14.tar.gz
+        sha256: 0ee733c67d16a4283a2d7ce0524503228d57b9aa40bdf56538beebbab1ebc376
+    cleanup:
+      - /man
+
+  # The freedesktop runtime's Python has no tkinter, so build CPython
+  # against the tcl/tk above. Takes a few minutes once; cached afterwards.
+  - name: cpython
+    buildsystem: autotools
+    config-opts:
+      - --with-ensurepip=no
+    build-options:
+      env:
+        TCLTK_CFLAGS: -I/app/include
+        TCLTK_LIBS: -L/app/lib -ltcl8.6 -ltk8.6
+    sources:
+      - type: archive
+        url: https://github.com/python/cpython/archive/refs/tags/v3.12.7.tar.gz
+        sha256: 0c4db8f00ab490bfb5a4b0d0e763319d017226b5521f97e851412342ff04d459
+    cleanup:
+      - /lib/python3.12/test
+      - /lib/python3.12/idlelib
+
+  - name: framework-gui
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 framework_gui.py /app/share/framework-gui/framework_gui.py
+      # framework_gui.py imports parsers.py from its own directory - shipping
+      # one without the other gives an app that dies on launch.
+      - install -Dm644 parsers.py /app/share/framework-gui/parsers.py
+      - install -Dm755 framework-gui /app/bin/framework-gui
+      - install -Dm644 io.github.frameworkgui.FrameworkGUI.desktop
+        /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
+      - install -Dm644 io.github.frameworkgui.FrameworkGUI.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.frameworkgui.FrameworkGUI.svg
+    sources:
+      - type: file
+        path: ../framework_gui.py
+      - type: file
+        path: ../parsers.py
+      - type: file
+        path: framework-gui
+      - type: file
+        path: io.github.frameworkgui.FrameworkGUI.desktop
+      - type: file
+        path: io.github.frameworkgui.FrameworkGUI.svg

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Framework System GUI
+Comment=Control Framework laptop firmware settings (framework_tool)
+Exec=framework-gui
+Icon=io.github.frameworkgui.FrameworkGUI
+Terminal=false
+Categories=System;Settings;HardwareSettings;
