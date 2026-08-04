@@ -37,7 +37,7 @@ DEPENDENCIES = (
     {
         "id": "framework_tool",
         "name": "framework_tool",
-        "why": "The Framework CLI everything on the other tabs drives. "
+        "why": "The Framework CLI everything else in this app drives. "
                "Without it this app can do nothing at all.",
         "probe": ("framework_tool", "framework-tool"),
         "vendors": None,          # relevant on every machine
@@ -56,7 +56,7 @@ DEPENDENCIES = (
         "id": "ryzenadj",
         "name": "RyzenAdj",
         "why": "Sets real sustained/boost power limits (STAPM, PPT) on AMD "
-               "Ryzen APUs — the TDP control on the Power tab.",
+               "Ryzen APUs — the TDP control on the CPU limits pane.",
         "probe": ("ryzenadj",),
         "vendors": ("amd",),
         "homepage": "https://github.com/FlyGoat/RyzenAdj",

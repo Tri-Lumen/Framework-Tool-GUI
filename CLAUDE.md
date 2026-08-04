@@ -8,17 +8,27 @@ works.
 
 ## What this is
 
-A Tkinter GUI for [framework_tool](https://github.com/FrameworkComputer/framework-system),
+A PySide6/Qt GUI for [framework_tool](https://github.com/FrameworkComputer/framework-system),
 the official CLI for controlling Framework laptop/desktop firmware (fans,
 battery charge limits, keyboard backlight, USB-C PD ports, etc). The GUI
 shells out to the CLI and parses its text output — it has no direct hardware
 access of any kind.
 
 It has since grown past framework_tool, by explicit request, into three more
-tabs: **Power (TDP)** (RyzenAdj, Linux powercap, Windows powercfg), **Setup**
-(installing those helpers), and **Drivers** (links to Framework's downloads
-list per device build, plus vendor drivers for swapped-in parts). Same shape as the rest of the app — run a program, parse its output
+sections: **CPU limits** (RyzenAdj, Linux powercap, Windows powercfg),
+**Setup** (installing those helpers), and **Drivers** (links to Framework's
+downloads list per device build, plus vendor drivers for swapped-in parts).
+Same shape as the rest of the app — run a program, parse its output
 best-effort — and the same rule: the app never touches hardware itself.
+
+**It was a Tkinter app until the desktop redesign.** A design handoff
+(`Framework GUI - Desktop.dc.html`, direction 1b) replaced the top bar +
+nine-tab notebook + output pane with a rail/pane/content/drawer window, and
+the toolkit went with it. The handoff named two routes and put Qt first:
+Tkinter cannot composite acrylic, has no real translucency, and its widget
+styling does not reach these screens. Everything below the UI —
+`parsers.py`, `power.py`, `deps.py`, `drivers.py` — carried over unchanged,
+as did all the command plumbing and the `BLOCKED` flag set.
 
 Two distribution targets only, by explicit request: a Windows exe/installer
 and a Linux Flatpak. (An earlier Linux "script installer" was built and then
@@ -33,28 +43,57 @@ when that command finishes.
 ## Quick orientation
 
 ```
-framework_gui.py      Tk app — UI, command execution, the 14 "Tools" workflows
-parsers.py             Pure-Python: regex parsers + detect_model(). No tkinter
+framework_gui.py      Qt app — layout, command execution, the 14 diagnostics.
+                        One of only two modules that import PySide6.
+widgets.py             Reusable UI pieces: Panel, Card, Bar, Badge, RailButton,
+                        PaneItem, Segmented, Grabber, ChassisDiagram,
+                        ModuleIcon, MetricPanel, SensorRow, ImageSlot,
+                        Spinner. No colour literals — tokens by name only.
+theme.py               Design tokens + the Qt style sheet rendered from them.
+                        No toolkit import: the sheet is a string.
+navigation.py          Rail groups, pane items, and the declarative content of
+                        every gated pane (14 tools, 9 port queries, 9 settings
+                        rows). Keys, not bound methods, so it stays testable.
+appstate.py            The two persisted UI choices (appearance, drawer height).
+backdrop.py            Compositing probe + the Windows 11 backdrop call.
+device_images.py       Board string → product photograph. Filenames only.
+module_icons.py        Expansion-card SVG paths + the module classifier.
+parsers.py             Pure-Python: regex parsers + detect_model(). No toolkit
                         import, so it's unit-testable without a display.
 power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
                         powercfg. Builds commands, does no I/O of its own.
 deps.py                Helper-tool registry: detect, and build install plans.
 drivers.py             Framework download-page catalog. Links only, no I/O.
-                        (all three follow parsers.py's rules: stdlib only, no
-                        tkinter, I/O injected as arguments)
+                        (everything except framework_gui.py and widgets.py
+                        follows parsers.py's rules: stdlib only, no toolkit
+                        import, I/O injected as arguments)
+assets/devices/        One product photograph per chassis, for the Overview.
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
 tests/test_power.py    Unit tests for power.py — unit conversions especially.
 tests/test_deps.py     Unit tests for deps.py — every install plan path.
 tests/test_drivers.py  Unit tests for drivers.py — board matching + catalog.
-tests/test_smoke_gui.py Full-app tests: real App(), real mainloop(), stub CLI
-                        binary on PATH, assert on which buttons survive gating.
-                        Needs a display (xvfb-run on headless Linux); skips
+tests/test_theme.py    Token table + style sheet: both appearances complete,
+                        no unrendered placeholder, every colour paintable.
+tests/test_navigation.py  The gating table, without a display — the same
+                        assertions the smoke tests make, in milliseconds.
+tests/test_appstate.py Persisted settings, with injected I/O. A corrupt file
+                        must never stop the app launching.
+tests/test_backdrop.py The compositing decision table for every platform.
+tests/test_device_images.py  Board → photograph, plus that every image the
+                        catalog names is actually shipped and small enough.
+tests/test_module_icons.py   Icon paths are well-formed and inside their
+                        viewBox; the classifier declines to guess.
+tests/test_smoke_gui.py Full-app tests: real App(), real event loop, stub CLI
+                        binary on PATH, assert on which controls survive
+                        gating. Needs PySide6 and a platform plugin
+                        (QT_QPA_PLATFORM=offscreen, or xvfb-run); skips
                         itself on Windows (the stub binary is POSIX-only).
-tests/test_packaging.py Asserts every app module is carried by every packaging
-                        path, that every install path leaves an uninstaller and
-                        a Start Menu entry, and that the release workflow
-                        produces exactly the assets the README links. No
-                        display, no build tooling needed.
+tests/test_packaging.py Asserts every app module and every device image is
+                        carried by every packaging path, that only the UI
+                        layer imports PySide6, that every install path leaves
+                        an uninstaller and a Start Menu entry, and that the
+                        release workflow produces exactly the assets the
+                        README links. No display, no build tooling needed.
 windows/               build.bat (PyInstaller), installer.iss (Inno Setup),
                         install.ps1 / install-exe.ps1 (+ .cmd wrappers), uninstall
 flatpak/               manifest, .desktop, launcher script, icon, its own README
@@ -72,9 +111,17 @@ Run the tests before changing `parsers.py` or the gating logic in
 condition during development (see "Known gotchas" below).
 
 ```bash
-python3 -m unittest discover tests -v          # parser tests only, if no display
+pip install -r requirements.txt                     # PySide6-Essentials
+python3 -m unittest discover tests -v               # logic tests, if no Qt
 xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover tests -v   # or this
 ```
+
+Qt's wheels bring Qt but not the X/EGL libraries it links against. On a bare
+Linux box the smoke tests will silently skip until `libegl1 libgl1
+libxkbcommon-x11-0 libxcb-cursor0` (and the rest of the list in
+`.github/workflows/ci.yml`) are installed — green-but-testing-nothing is the
+failure mode to watch for.
 
 ## Architecture notes
 
@@ -83,7 +130,7 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   `detect_model()`, which turns `--versions` output into a capability dict
   (`is_laptop`, `has_touchscreen`, `has_expansion_bay`, etc). Keep new
   parsing logic here, not inline in `framework_gui.py`, so it stays testable
-  without tkinter.
+  without a toolkit.
 
 - **The CLI has no stable output format.** The upstream repo says so
   explicitly ("the commandline does not guarantee a stable interface").
@@ -114,6 +161,85 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   own documented restrictions (`EXAMPLES.md` says expansion bay is
   "Laptop 16 only" and RGB is "Framework Desktop" only).
 
+- **The UI layer is exactly two modules.** `framework_gui.py` and
+  `widgets.py` import PySide6; nothing else does, and
+  `tests/test_packaging.py` fails if that changes. That line is what keeps
+  the gating rules, the token table and every parser testable in
+  milliseconds on a machine with no Qt platform plugin.
+
+- **One token table, no colour literals.** `theme.py` holds every colour,
+  size, spacing step and chrome metric, and renders the Qt style sheet from
+  a template against them. Qt style sheets have no variables of their own,
+  so a typo in a token name raises `KeyError` at render time instead of
+  silently producing an unstyled widget. Widgets that Qt cannot style (the
+  bars, the rail's selection marker, the chassis drawing) paint themselves
+  and ask `widgets.colour()` / `widgets.qcolour()` for the same tokens;
+  `widgets.set_appearance()` is how those know which of the two surface sets
+  is in force. Do not put a colour anywhere else.
+
+- **Navigation is data.** `navigation.py` holds the five rail groups, the
+  nine sections, and the declarative content of every gated pane: the 14
+  diagnostics, the 9 port queries, the 9 settings rows. Rows name a *key*;
+  `framework_gui.py` maps the key to a method or a widget. A list holding
+  bound methods could only be tested by constructing the app, which needs a
+  display — this way `tests/test_navigation.py` makes the same gating
+  assertions the smoke tests make, without one.
+
+- **Acrylic is probed, never assumed.** `backdrop.py` answers "can this
+  session composite a translucent window": Windows 11 build 22621 or later
+  via `DWMWA_SYSTEMBACKDROP_TYPE`, Wayland always, X11 only when something
+  owns the `_NET_WM_CM_S0` selection, everything else no. An uncertain
+  answer is always no, because a translucent surface with nothing composited
+  behind it is worse than an opaque one. When the answer is no the app
+  forces the opaque appearance, disables the Acrylic segment and shows the
+  fallback strip. There is no portable blur on Linux, so acrylic there means
+  translucency without one; on Windows 11 it is the real system backdrop.
+  (The handoff's table numbers the `DWM_SYSTEMBACKDROP_TYPE` values one
+  higher than the Windows SDK does; `backdrop.py` follows the SDK.)
+
+- **The drawer is the output pane, one tab per program.** Every command is
+  echoed as a `$ …` line into a log named for the program that ran it —
+  `framework_tool`, `ryzenadj`, `apt-get` — with its output after it. Lines
+  are inserted with a character format rather than as HTML so the CLI's text
+  is never reformatted, which the design is explicit about. Height is
+  dragged with the grabber, clamped to 70–460px, and persisted.
+
+- **Overview readings cost three more elevated commands.** `--versions` is
+  the launch scan, as it always was. The six stat cards and the bay panel
+  also need `--power -vv`, `--thermal` and `--pdports` (plus
+  `--charge-limit`, and `--expansion-bay` on a Laptop 16). Running those
+  automatically behind `pkexec` would mean several extra password prompts on
+  every launch, so they run on their own only when already root and
+  otherwise wait for "Rescan device". Do not make them unconditional.
+
+- **Device photographs are per chassis, not per mainboard.** Swapping the
+  mainboard does not change what the machine looks like, which collapses the
+  handoff's list of eleven images to five plus a fallback. Two things do
+  change the outside and get their own image: the Laptop 13 Pro's black lid,
+  and a Laptop 16 with a Graphics Module fitted (detected from
+  `--expansion-bay`). `device_images.py` is the mapping and does no I/O
+  beyond `path_for()`; a build shipped without the images falls back to the
+  text slot in `widgets.ImageSlot` rather than showing a blank rectangle.
+
+- **Expansion-card marks are drawn, not shipped.** `module_icons.py` holds
+  an 18×18 stroke path per module type, in the same idiom as the rail icons,
+  so they tint to the port's state and stay sharp at any scale with no image
+  files. Storage cards are deliberately the exception: one storage card
+  looks exactly like another, so those rows show the capacity in a bordered
+  box instead. **What the app can actually identify is thin** — `--pdports`
+  only says whether a bay negotiated a PD contract, which means USB-C and
+  nothing else does, so that is the only inference made.
+  `readings["module_hints"]` is the seam where real per-bay identification
+  plugs in if the CLI ever reports it; until then an unidentified bay gets
+  the neutral mark, not a plausible guess.
+
+- **Danger styling is a rule, not a decoration.** Every destructive or
+  hardware-risky control gets the danger colours *at the control*, plus a
+  confirmation naming the exact command before it runs: Apply limits, Max
+  burst, Fan max burst, and Set on Input deck mode (the deck carries the
+  keyboard and trackpad, so switching it off leaves the machine without
+  either). Never give one of these a neutral button.
+
 - **Command execution wrapping** (`_build_cmd` in `framework_gui.py`):
   `[binary] + args`, optionally prefixed with `pkexec` (Linux, unless
   already root) and/or `flatpak-spawn --host` (when running inside the
@@ -121,8 +247,9 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   deliberate, unavoidable sandbox hole; see `flatpak/README.md`).
 
 - **Two command paths, on purpose.** `_build_cmd`/`_exec` are
-  framework_tool-only: they put the binary from the top bar in front of the
-  args. Everything on the Power/Setup/Drivers tabs runs a *different*
+  framework_tool-only: they put the binary from the Console pane in front of
+  the args. Everything on the CPU limits/Setup/Drivers panes runs a
+  *different*
   program, so it goes through `_build_external`/`_exec_external`, which
   applies the same pkexec and flatpak-spawn wrapping with no binary
   prefixed. Don't route helper tools through `run()` — you'd get
@@ -167,12 +294,17 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   decision across the project, not an oversight.
 
 - **Threading model**: every command runs on a background `threading.Thread`
-  so the UI never blocks; results come back via `self.after(0, ...)`. The
-  14 "Tools" (fan sweep, thermal monitor, etc.) are multi-step sequences
-  with a shared cancel flag (`self._cancel`) checked between steps, and a
-  Cancel button in the top bar. State-changing tools (fan duty, kb
-  backlight, fingerprint LED) always restore the previous/auto state in a
-  `finally` block, including on cancel.
+  so the UI never blocks; results come back by emitting a Qt signal, which
+  Qt queues onto the UI thread. A worker thread must never touch a widget —
+  `sig_log`, `sig_status`, `sig_detected`, `sig_progress`, `sig_readings`,
+  `sig_fill` and `sig_tool_done` are the whole interface between them and
+  the UI, and that is the Qt equivalent of the Tk version's `after(0, …)`
+  rule. The 14 diagnostics are multi-step sequences with a shared cancel
+  flag (`self._cancel`) checked between steps; the multi-step ones report
+  per-step progress into the Diagnostics detail panel, whose "Cancel and
+  restore auto" button stays reachable for the whole run. State-changing
+  tools (fan duty, kb backlight, fingerprint LED) always restore the
+  previous/auto state in a `finally` block, including on cancel.
 
 ## Known gotchas (learned the hard way — don't reintroduce these)
 
@@ -197,64 +329,69 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
    as two distinct steps (build once centrally, deploy per-device) — don't
    collapse them back into one script without preserving both use cases.
 
-4. **Starting a background thread that touches a `tk.Variable` before
-   `mainloop()` is actually running throws
-   `RuntimeError: main thread is not in main loop`.** This bit the initial
-   device-scan-on-launch: it originally called `self._rescan()` directly
-   at the end of `__init__`, which raced Tk's startup. Fixed with
-   `self.after(150, self._rescan)` so the scan is scheduled through Tk's
-   own event loop instead of firing immediately. If you add more
-   startup-time background work, schedule it the same way — don't call
-   `threading.Thread(...).start()` directly from `__init__`.
+4. **Schedule startup background work through the event loop, not from
+   `__init__`.** In the Tk version, spawning the device-scan thread directly
+   from `__init__` raced Tcl's startup and threw
+   `RuntimeError: main thread is not in main loop`; the fix was
+   `self.after(150, self._rescan)`. Qt is not as fragile here, but the same
+   shape is kept — `QTimer.singleShot(150, self._rescan)` — because the
+   window should be on screen before a scan that can take seconds reports
+   back into it. Do the same for any new startup-time background work.
 
-5. **The app is two modules, and every packaging path has to carry both.**
-   `framework_gui.py` imports `parsers.py`. The original single-file
+5. **The app is twelve modules plus an assets directory, and every
+   packaging path has to carry all of them.** The original single-file
    packaging (PyInstaller work dir, `install.ps1`, the Flatpak manifest)
-   shipped only `framework_gui.py`, which produces an exe/Flatpak that
-   dies with `ModuleNotFoundError: No module named 'parsers'` on launch —
-   invisible until you run the *packaged* build, since running from a
-   source checkout always works. `tests/test_packaging.py` now fails if a
-   root-level module is missing from any packaging path; if you add a
-   module, update `windows/build.bat`, `windows/install.ps1`, and
+   shipped only `framework_gui.py`, which produces an exe/Flatpak that dies
+   with `ModuleNotFoundError: No module named 'parsers'` on launch —
+   invisible until you run the *packaged* build, since running from a source
+   checkout always works. The redesign multiplied the ways to get this
+   wrong: seven more modules, seven device images, and PySide6 itself.
+   `tests/test_packaging.py` fails if a root-level module or a device image
+   is missing from any packaging path, and if the Flatpak manifest stops
+   installing PySide6. If you add a module or an image, update
+   `windows/build.bat`, `windows/install.ps1`, and
    `flatpak/io.github.frameworkgui.FrameworkGUI.yml` (both the
    `install -Dm644` command and the `sources:` list).
 
-6. **Testing Tk apps needs a real `mainloop()`, not a polling loop.**
-   Calling `app.update()` in a `while` loop from test code hits the same
-   cross-thread RuntimeError as #4, because Tkinter only marshals
-   background-thread Tk calls while the interpreter is genuinely inside
-   `mainloop()`. `tests/test_smoke_gui.py` runs `app.mainloop()` for real
-   and uses `app.after(...)` as its own polling/timeout mechanism, quitting
-   the loop once results are captured. Follow that pattern for any new
-   GUI test.
+   The images have one extra wrinkle: PyInstaller's `--onefile` unpacks
+   bundled data into a temporary tree it advertises as `sys._MEIPASS`, so
+   `device_images.asset_root()` looks there first and next to the module
+   otherwise. Load a data file any other way and it works from a checkout
+   and not from the exe.
 
-7. **Sequential Tk interpreters in one test process need explicit
-   teardown.** Each GUI test builds a fresh `App()`. If the previous one is
-   left to the garbage collector, its Tk variables' `__del__` (which calls
-   into Tcl) can run at an arbitrary later moment — including from the
-   *next* app's device-scan thread — which corrupts Tcl's async state and
-   leaves the next scan permanently pending. Symptom: an intermittent test
-   timeout in whichever GUI test happened to run later, plus
-   `RuntimeError: main thread is not in main loop` and
-   `Tcl_AsyncDelete: async handler deleted by the wrong thread` on stderr.
-   `_drive_app()` therefore cancels its pending `after` timer, destroys the
-   app, drops the reference, and calls `gc.collect()` while still on the
-   main thread with no mainloop running. Keep that teardown. (This is
-   test-harness-only: real users get one App per process.)
+6. **GUI tests need a real event loop, and a real teardown between
+   apps.** Each test builds a fresh `App()` in the same process. Let the
+   loop run (`app.exec()`) and quit it from a `QTimer` once results are
+   captured, rather than pumping events by hand; then `close()` and
+   `deleteLater()` the window and let `processEvents()` reap it before the
+   next one is built. Two windows alive at once share the application-wide
+   style sheet and the second one's assertions start reading the first
+   one's widgets. (The Tk version needed the same discipline for a nastier
+   reason — Tk variables' `__del__` calling into Tcl from the *next* app's
+   worker thread, producing `Tcl_AsyncDelete: async handler deleted by the
+   wrong thread` and an intermittent timeout. The lesson survived the
+   toolkit change even though the mechanism did not.)
 
-8. **Re-packing a widget moves it to the end of the pack order.**
-   `_build_tabs()` destroys and rebuilds the notebook on every rescan. When
-   it packed the new notebook straight into the window, the tabs landed
-   *below* the output pane and the status bar the moment the first device
-   scan finished — the app looked fine until detection returned, which is
-   why it survived so long. The notebook now lives in a `tabs_holder` frame
-   packed exactly once in `__init__`. Anything else rebuilt at runtime needs
-   the same treatment.
+7. **Qt does not re-evaluate property selectors on its own.** Variants are
+   selected with dynamic properties (`role`, `running`, `selected`), and
+   setting one changes nothing visible until the widget is unpolished and
+   re-polished — that is what `widgets.restyle()` is for. A running tool row
+   that keeps its idle colours is this bug, not a style-sheet bug.
 
-9. **Screenshots of a Tk app under Xvfb lie if you only call
-   `update_idletasks()`.** Half the widgets come out blank — the geometry is
-   right, the paint hasn't happened. `update()` plus a short `after()` delay
-   before grabbing gives a true picture. Worth knowing before "fixing" a
+8. **A rebuilt widget tree has to be put back where it was.** `_build_pages()`
+   destroys and rebuilds every section on each device scan, because gating
+   changes which rows *exist*, not just whether they are enabled. It also
+   re-applies anything already read (`_apply_readings({})`), or the panes
+   would look unread the moment a rescan finished. The Tk version had a
+   sharper version of the same trap: re-packing a widget moved it to the end
+   of the pack order, so after the first scan the tabs landed below the
+   output pane. Anything rebuilt at runtime needs its position and its state
+   restored deliberately.
+
+9. **Screenshots under Xvfb lie if you grab too early.** Widgets come out
+   blank — the geometry is right, the paint hasn't happened. Let the event
+   loop turn (a short `QTimer.singleShot` after `processEvents()`) before
+   `window.grab()`. Worth knowing before "fixing" a
    layout bug that isn't there.
 
 ## Not yet verified (be skeptical, not confident)
@@ -268,8 +405,32 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   mode, but it means "the regex matched the docs" is not the same
   guarantee as "the regex matches your CLI version." If you have access to
   a real Framework device, that's the highest-value next step: run each
-  Info/Tools button and diff actual output against the samples in
-  `tests/test_parsers.py`.
+  diagnostic and each Ports & modules query and diff actual output against
+  the samples in `tests/test_parsers.py`.
+- **The whole app has only ever run under Xvfb and Qt's offscreen
+  platform.** The layout was checked by screenshotting all nine sections at
+  the design's 1180x780 and comparing them to the handoff's captures, which
+  is a real check but not the same as using it. Nothing has exercised a
+  window manager, a HiDPI screen, a font that is not DejaVu, or the
+  responsive collapse below 1040px on a real desktop.
+- **Acrylic has never been composited.** `backdrop.py`'s decision table is
+  unit-tested, but the CI environment has no compositor, so every screenshot
+  is the opaque path. The Windows 11 `DwmSetWindowAttribute` call, the dark
+  native titlebar it also asks for, and translucency under a real Wayland or
+  KWin session are all unexercised. If it looks wrong on Windows, check the
+  `DWM_SYSTEMBACKDROP_TYPE` value first — the handoff and the SDK disagree
+  about the numbering and this follows the SDK.
+- **IBM Plex is specified but not vendored.** `theme.py` names IBM Plex Sans
+  and Mono; no font files are in the repo, so every build falls back to the
+  platform's own sans and mono faces. `load_fonts()` will pick up
+  `.ttf`/`.otf` files dropped into a `fonts/` directory next to the modules,
+  which is the intended way to add them (they are OFL and free to bundle).
+  Until then the type is right in size and weight but not in face.
+- **The device photographs came from the project owner, not from a licence
+  check.** They are Framework product images; the repo carries no note of
+  what permits their redistribution. Sort that out before publishing a
+  release, or replace them — the app is complete without them, since
+  `widgets.ImageSlot` falls back to text.
 - **`windows/build.bat` now runs for real in CI** (via the
   `.github/actions/build-windows` composite action, which invokes the script
   itself rather than a reimplementation, and CI uploads the resulting
@@ -284,14 +445,21 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   up on push. Nobody has *run* the resulting `FrameworkGUI-Setup.exe`: the
   install/uninstall round trip, the Start Menu group and the `AppId`-based
   upgrade path are unverified.
-- **`flatpak/io.github.frameworkgui.FrameworkGUI.yml` is now built by
-  `.github/workflows/release.yml`** (release-published and
-  `workflow_dispatch`, not on every push — it compiles Tcl/Tk and CPython
-  from source). It had never been built when that job was written, so the
-  first run may well fail; rehearse it with `workflow_dispatch` before
-  relying on a release. `tests/test_packaging.py` still only checks the
-  manifest's *structure*, and the `flatpak-spawn --host` runtime behavior
-  remains unexercised regardless of whether the build goes green.
+- **The Flatpak manifest was rewritten for Qt and has not been built
+  since.** It moved from `org.freedesktop.Platform//24.08` (compiling Tcl,
+  Tk and CPython from source) to `org.kde.Platform//6.7` plus two pinned
+  PySide6 wheels. That should be both faster and simpler, but it is a fresh,
+  unbuilt manifest: expect the first `workflow_dispatch` run to turn up
+  something — a wheel that wants a newer `pip`, a missing platform plugin,
+  the runtime's Python being a version the `cp39-abi3` wheels do not load
+  into. Rehearse it before relying on a release. `tests/test_packaging.py`
+  still only checks the manifest's *structure*, and the
+  `flatpak-spawn --host` runtime behaviour remains unexercised regardless of
+  whether the build goes green.
+- **`windows/build.bat` now installs PySide6 and bundles `assets/`, and
+  neither change has been through CI yet.** The exe will be far larger than
+  the Tkinter one. If it fails to launch, the first thing to check is
+  whether PyInstaller collected Qt's platform plugins.
 - **The release workflow itself has never fired.** The
   `gh release upload` steps, the tag→version derivation and the
   `/releases/latest/download/...` links in the README all go live the first
@@ -303,31 +471,31 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   was written against upstream's README sample, exactly the same
   "matched the docs, not your version" caveat as the framework_tool parsers.
   Sanity-check on real hardware by applying a limit and reading it back —
-  the Power tab does that read-back automatically after Apply.
+  the CPU limits pane does that read-back automatically after Apply.
 - **The Framework Knowledge Base URLs in `drivers.py` were collected from
   search results, not by loading each page.** They are the right shape and
   the right articles, but a moved article shows up as a 404 in someone's
-  browser. Now that the tab is links-only these URLs *are* the feature, so
+  browser. Now that the pane is links-only these URLs *are* the feature, so
   confirming all twelve in a real browser matters more than it used to.
-- **The persistence links on the Power tab have not been opened either.**
-  Same caveat, smaller blast radius: a dead one costs a user a search.
+- **The persistence links on the CPU limits pane have not been opened
+  either.** Same caveat, smaller blast radius: a dead one costs a user a search.
 - The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
   crude placeholder, not real artwork.
 
 ## Deliberately out of scope
 
-- **Persisting power limits across reboots.** The limits the Power tab sets
-  are volatile — that is a property of the SoC registers, not a bug. Making
+- **Persisting power limits across reboots.** The limits the CPU limits pane
+  sets are volatile — that is a property of the SoC registers, not a bug. Making
   them stick needs something to re-apply them at boot and after resume: a
   systemd unit, a scheduled task, a tray agent. All of those are background
   processes, which is the one requirement this project has never bent. The
   UI states the limitation instead. If this comes back, it is a decision to
   drop the no-background-processes rule, not a small feature.
-- **Driving ThrottleStop.** It has no command line. The Setup tab can point
-  at it and the Drivers tab can link it, but nothing here can script it. On
+- **Driving ThrottleStop.** It has no command line. The Setup pane can point
+  at it and the Drivers pane can link it, but nothing here can script it. On
   Intel, `powercfg` (Windows) and RAPL (Linux) are what the app can actually
   drive.
-- **Running downloaded installers.** The Drivers tab downloads a bundle and
+- **Running downloaded installers.** The Drivers pane downloads a bundle and
   stops there. Executing a vendor installer unattended, as an elevated
   process, is not something this app should do on a user's behalf.
 
@@ -354,20 +522,36 @@ especially the Flatpak job, which had never been run when it was written.
 
 ## Suggested next steps, roughly in priority order
 
-1. Get access to a real Framework device (any model) and validate the
+1. Rehearse `.github/workflows/release.yml` with `workflow_dispatch`. The
+   Flatpak manifest was rewritten from source-built Tcl/Tk/CPython to the
+   KDE runtime plus pinned PySide6 wheels and has not been built once; the
+   Windows build now installs PySide6 and bundles `assets/`. Both are new
+   and both are between you and a release.
+2. Launch the built exe and the built Flatpak and look at them. Everything
+   so far has been Xvfb and Qt's offscreen platform — no window manager, no
+   HiDPI, no real fonts. This is where a packaged-only failure (a missing
+   Qt platform plugin, an asset that did not make it into `sys._MEIPASS`)
+   would show up.
+3. Get access to a real Framework device (any model) and validate the
    parsers/detection against real `--versions`/`--power`/`--thermal`/
-   `--pdports` output. This is the single highest-value thing to do next.
-2. Rehearse `.github/workflows/release.yml` with `workflow_dispatch` and fix
-   whatever the Flatpak job turns up — it is the one build step that had
-   never executed anywhere before it was added.
-3. Run `FrameworkGUI-Setup.exe` on a real Windows machine: install,
+   `--pdports` output. Still the single highest-value thing for correctness,
+   and the Overview's stat cards and bay panel are new consumers of that
+   output.
+4. See acrylic composited for the first time: Windows 11 for the real system
+   backdrop and the dark titlebar, a Wayland or KWin session for the Linux
+   translucency path. Check the fallback strip appears where it should.
+5. Vendor IBM Plex Sans/Mono into `fonts/` (OFL, free to bundle) so the type
+   matches the design instead of falling back to the platform's faces.
+6. Settle the licence position on `assets/devices/*.png` and write it down,
+   or replace them.
+7. Run `FrameworkGUI-Setup.exe` on a real Windows machine: install,
    Start Menu group, uninstall, reinstall over the top. CI proves it
    compiles, nothing yet proves it installs.
-4. Same for the script installers (`install-exe.cmd`) from an SMB share,
+8. Same for the script installers (`install-exe.cmd`) from an SMB share,
    including the uninstaller they now drop in `%LOCALAPPDATA%\FrameworkGUI`.
-5. Apply a power limit on a real AMD Framework with RyzenAdj installed and
+9. Apply a power limit on a real AMD Framework with RyzenAdj installed and
    confirm the read-back matches — then do the same for RAPL on Intel Linux
    and `powercfg` on Windows.
-6. Open all twelve Knowledge Base URLs in `drivers.py` in a browser and
-   confirm each still resolves — they are the whole Drivers tab now.
-7. Real app icon for the Flatpak `.desktop`/icon file.
+10. Open all twelve Knowledge Base URLs in `drivers.py` in a browser and
+    confirm each still resolves — they are the whole Drivers pane now.
+11. Real app icon for the Flatpak `.desktop`/icon file, and a Windows `.ico`.

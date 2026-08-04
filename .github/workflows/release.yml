@@ -79,8 +79,9 @@ jobs:
   flatpak:
     name: Linux Flatpak bundle
     runs-on: ubuntu-latest
-    # The manifest compiles Tcl, Tk and CPython from source. First build is
-    # slow; the cache below makes reruns cheaper but never assume it hits.
+    # The manifest installs PySide6 from pinned wheels against the KDE
+    # runtime's Qt, so nothing is compiled from source any more. It is still
+    # the longest job here: the runtime is a large download.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +96,7 @@ jobs:
           flatpak remote-add --if-not-exists --user \
             flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub \
-            org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+            org.kde.Platform//6.7 org.kde.Sdk//6.7
 
       # Keyed on the manifest: the sources it pins are the whole build input,
       # so any edit to it correctly invalidates the cache.

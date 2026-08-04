@@ -20,7 +20,14 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from parsers import detect_model, parse_ports  # noqa: E402
+from parsers import (  # noqa: E402
+    detect_model,
+    parse_firmware,
+    parse_ports,
+    parse_setting_value,
+    parse_tool_version,
+    sections,
+)
 
 POWER_VV = """Charger Status
   AC is:            connected
@@ -258,6 +265,118 @@ class TestDeviceDetection(unittest.TestCase):
         c = detect_model("")
         self.assertFalse(c["detected"])
         self.assertTrue(c["is_laptop"])
+
+
+class TestChassis(unittest.TestCase):
+    """The short name the Overview heading uses.
+
+    The full board string carries the mainboard generation too, which is
+    what the sub-line is for; 22px of heading only fits the chassis.
+    """
+
+    def test_each_recognised_chassis(self):
+        for text, expected in ((VERSIONS_L12, "Laptop 12"),
+                               (VERSIONS_L13_NO_TOUCH, "Laptop 13"),
+                               (VERSIONS_L16, "Laptop 16"),
+                               (VERSIONS_DESKTOP, "Desktop")):
+            self.assertEqual(detect_model(text)["chassis"], expected)
+
+    def test_an_unrecognised_board_has_no_chassis(self):
+        # Empty rather than a guess: the UI says "Unknown device" itself.
+        self.assertEqual(detect_model(VERSIONS_GARBAGE)["chassis"], "")
+
+    def test_the_full_board_string_is_still_there(self):
+        caps = detect_model(VERSIONS_L16)
+        self.assertIn("Laptop 16", caps["model"])
+        self.assertIn("7040", caps["model"])
+
+
+class TestSections(unittest.TestCase):
+
+    def test_groups_indented_rows_under_their_header(self):
+        found = sections(VERSIONS_L12)
+        self.assertIn("Mainboard Hardware", found)
+        self.assertTrue(any(row.startswith("Type:")
+                            for row in found["Mainboard Hardware"]))
+
+    def test_blank_lines_are_ignored(self):
+        self.assertEqual(sections("A\n\n  x: 1\n"), {"A": ["x: 1"]})
+
+    def test_empty_input(self):
+        self.assertEqual(sections(""), {})
+        self.assertEqual(sections(None), {})
+
+
+FIRMWARE_SECTIONED = """Mainboard Hardware
+  Type:           Laptop 13 (AMD Ryzen AI 300 Series)
+EC Firmware
+  Build version:  "hx30 0.1.4"
+  Current image:  RO
+BIOS
+  Version: 3.03
+"""
+
+FIRMWARE_INLINE = """Mainboard Type: Laptop 13 (AMD Ryzen AI 300 Series)
+EC Firmware: hx30 0.1.4
+BIOS: 3.03
+"""
+
+
+class TestFirmware(unittest.TestCase):
+
+    def test_sectioned_output(self):
+        self.assertEqual(parse_firmware(FIRMWARE_SECTIONED),
+                         {"ec": "hx30 0.1.4", "bios": "3.03"})
+
+    def test_inline_output(self):
+        # An older shape of the same information; both are accepted because
+        # the CLI does not guarantee its format.
+        self.assertEqual(parse_firmware(FIRMWARE_INLINE),
+                         {"ec": "hx30 0.1.4", "bios": "3.03"})
+
+    def test_missing_values_come_back_empty(self):
+        # The Overview drops a field it cannot read rather than printing a
+        # placeholder that looks like a reading.
+        self.assertEqual(parse_firmware(VERSIONS_GARBAGE),
+                         {"ec": "", "bios": ""})
+
+    def test_empty_input(self):
+        self.assertEqual(parse_firmware(""), {"ec": "", "bios": ""})
+
+
+class TestToolVersion(unittest.TestCase):
+
+    def test_reads_a_version(self):
+        for text in ("framework_tool 0.4.2", "framework_tool v0.4.2\n",
+                     "Framework Tool 1.0"):
+            self.assertTrue(parse_tool_version(text))
+
+    def test_exact_value(self):
+        self.assertEqual(parse_tool_version("framework_tool 0.4.2"), "0.4.2")
+
+    def test_nothing_to_read(self):
+        for text in ("", None, "no version here"):
+            self.assertEqual(parse_tool_version(text), "")
+
+
+class TestSettingValue(unittest.TestCase):
+
+    def test_percentage(self):
+        self.assertEqual(parse_setting_value("Max charge level: 80%"), "80")
+
+    def test_key_value(self):
+        self.assertEqual(parse_setting_value("Input Deck Mode: auto"), "auto")
+
+    def test_last_value_wins(self):
+        self.assertEqual(
+            parse_setting_value("Header: x\nFingerprint LED level: medium"),
+            "medium")
+
+    def test_declines_to_guess(self):
+        # Empty means the row keeps what it had; the raw output is in the
+        # drawer either way, so nothing is hidden by not guessing.
+        for text in ("", None, "some prose with no value in it"):
+            self.assertEqual(parse_setting_value(text), "")
 
 
 if __name__ == "__main__":

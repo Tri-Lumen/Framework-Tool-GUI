@@ -36,6 +36,18 @@ RE_TYPE = re.compile(r"^\s*Type:\s*(.+)$", re.MULTILINE)
 RE_TOUCHSCREEN = re.compile(r"^\s*Touchscreen\b", re.MULTILINE)
 RE_STYLUS = re.compile(r"^\s*Stylus\b", re.MULTILINE)
 
+# `--version` prints the tool's own version; the exact wording has changed
+# between releases, so match a bare vN.N.N anywhere in the first line.
+RE_TOOL_VERSION = re.compile(r"\bv?(\d+\.\d+(?:\.\d+)*)\b")
+
+# Firmware versions, for the Overview sub-line. Two shapes are accepted
+# because `--versions` groups values under a section header on current
+# releases but has printed them inline before:
+#
+#   EC Firmware              EC Firmware: hx30 0.1.4
+#     Build version: hx30    BIOS: 3.03
+RE_FLAT_VALUE = r"^\s*{}\s*:\s*\"?([^\"\n]+?)\"?\s*$"
+
 
 def parse_ports(text):
     """Return list of dicts per USB-C port from --pdports output."""
@@ -54,6 +66,92 @@ def parse_ports(text):
             d["watts"] = float(n.group(3))
         ports.append(d)
     return ports
+
+
+# A settings "Get" prints one value in one of a few shapes. These cover the
+# ones in EXAMPLES.md; anything else leaves the field alone rather than
+# filling it with a guess.
+RE_SETTING_PCT = re.compile(r"(\d+)\s*%")
+RE_SETTING_KV = re.compile(r":\s*([A-Za-z0-9.\-]+)\s*$", re.MULTILINE)
+
+
+def parse_setting_value(text):
+    """The single value a settings read printed, or '' if it is unclear.
+
+    Used to fill a Settings row from its Get button. Empty means the row
+    keeps whatever it had — the raw output is in the drawer either way, so
+    nothing is hidden by declining to guess.
+    """
+    body = text or ""
+    m = RE_SETTING_PCT.search(body)
+    if m:
+        return m.group(1)
+    m = None
+    for m in RE_SETTING_KV.finditer(body):
+        pass                     # the last key: value line is the answer
+    return m.group(1) if m else ""
+
+
+def sections(text):
+    """Split `--versions` output into {section header: [indented lines]}.
+
+    The CLI groups values under an unindented header with indented rows
+    beneath it. Headers repeat across releases even when the row labels
+    change, so keying on them survives more format drift than one big regex
+    would.
+    """
+    out = {}
+    current = None
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        if line[:1].strip():                      # unindented: a new header
+            current = line.strip().rstrip(":")
+            out.setdefault(current, [])
+        elif current is not None:
+            out[current].append(line.strip())
+    return out
+
+
+def _labelled(lines, labels):
+    for label in labels:
+        pattern = re.compile(RE_FLAT_VALUE.format(re.escape(label)),
+                             re.IGNORECASE)
+        for line in lines:
+            m = pattern.match(line)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return ""
+
+
+def parse_firmware(versions_text):
+    """EC and BIOS versions from `--versions`, '' for whatever is not there.
+
+    Best-effort like every parser here: the Overview drops a field it cannot
+    read rather than printing a placeholder that looks like a reading.
+    """
+    text = versions_text or ""
+    found = sections(text)
+    out = {}
+    for key, header, labels in (
+            ("ec", "EC Firmware", ("Build version", "Current version",
+                                   "Version")),
+            ("bios", "BIOS", ("Version", "Current version"))):
+        value = _labelled(found.get(header, ()), labels)
+        if not value:
+            # The inline shape: `EC Firmware: hx30 0.1.4` on one line.
+            value = _labelled(text.splitlines(), (header,))
+        out[key] = value
+    return out
+
+
+def parse_tool_version(version_text):
+    """The framework_tool version for the status bar, or ''."""
+    first = (version_text or "").strip().splitlines()
+    if not first:
+        return ""
+    m = RE_TOOL_VERSION.search(first[0])
+    return m.group(1) if m else ""
 
 
 def detect_model(versions_text):
@@ -81,6 +179,10 @@ def detect_model(versions_text):
     is_desktop = (model == "Desktop") if known else False
     return {
         "model": raw or "Unknown",
+        # The chassis on its own, for anywhere the full board string is too
+        # long to read as a name — the Overview heading, mainly. Empty when
+        # the board was not recognised, so callers can say so themselves.
+        "chassis": model or "",
         "detected": known,
         "is_laptop": is_laptop,
         "is_desktop": is_desktop,

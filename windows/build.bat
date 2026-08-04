@@ -28,16 +28,28 @@ REM Every module framework_gui.py imports has to come along. Miss one and
 REM PyInstaller happily builds an exe that dies with ModuleNotFoundError on
 REM launch - invisible from a source checkout, where the import works.
 REM tests/test_packaging.py fails if this list falls behind the repo.
-for %%M in (framework_gui.py parsers.py power.py deps.py drivers.py) do (
+for %%M in (framework_gui.py appstate.py backdrop.py deps.py device_images.py drivers.py module_icons.py navigation.py parsers.py power.py theme.py widgets.py) do (
     copy /y "%SRC%..\%%M" "%WORK%\" >nul || (
         echo Could not copy %%M - check the share is reachable.
         goto :fail
     )
 )
 
+REM The device photographs the Overview shows. --add-data below is what
+REM carries them into the exe; device_images.py finds them again through
+REM sys._MEIPASS.
+xcopy /e /i /y "%SRC%..\assets" "%WORK%\assets" >nul || (
+    echo Could not copy the assets directory - check the share is reachable.
+    goto :fail
+)
+
 pushd "%WORK%" || goto :fail
-%PY% -m pip install --upgrade pyinstaller || (popd & goto :fail)
-%PY% -m PyInstaller --onefile --noconsole --uac-admin --name FrameworkGUI framework_gui.py || (popd & goto :fail)
+REM PySide6-Essentials rather than the full PySide6: the app uses
+REM QtWidgets, QtGui, QtCore and QtSvg, and the extras (WebEngine, 3D,
+REM Charts) would add hundreds of megabytes to the exe for nothing.
+%PY% -m pip install --upgrade pyinstaller "PySide6-Essentials>=6.6" || (popd & goto :fail)
+%PY% -m PyInstaller --onefile --noconsole --uac-admin --name FrameworkGUI ^
+    --add-data "assets;assets" framework_gui.py || (popd & goto :fail)
 popd
 
 if not exist "%SRC%dist" mkdir "%SRC%dist"

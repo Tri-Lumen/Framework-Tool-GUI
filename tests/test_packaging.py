@@ -32,9 +32,60 @@ class TestAppModules(unittest.TestCase):
 
     def test_expected_modules_present(self):
         # A sanity anchor: if this changes, the rest of the file needs a look.
-        self.assertEqual(APP_MODULES, ["deps.py", "drivers.py",
-                                       "framework_gui.py", "parsers.py",
-                                       "power.py"])
+        self.assertEqual(APP_MODULES, [
+            "appstate.py", "backdrop.py", "deps.py", "device_images.py",
+            "drivers.py", "framework_gui.py", "module_icons.py",
+            "navigation.py", "parsers.py", "power.py", "theme.py",
+            "widgets.py"])
+
+    def test_only_the_ui_layer_imports_the_toolkit(self):
+        """The logic modules stay testable without a display.
+
+        parsers/power/deps/drivers/navigation/theme/appstate/backdrop/
+        device_images/module_icons are all unit-tested on machines with no
+        Qt platform plugin. An import of PySide6 in any of them would take
+        that away, and it is an easy thing to add by accident.
+        """
+        ui_layer = {"framework_gui.py", "widgets.py"}
+        for mod in APP_MODULES:
+            if mod in ui_layer:
+                continue
+            self.assertNotIn(
+                "PySide6", read(mod),
+                f"{mod} imports the UI toolkit — keep it display-free")
+
+
+class TestAssets(unittest.TestCase):
+    """The Overview's device photographs have to reach every build.
+
+    They are data, not code, so the module-list checks above miss them: an
+    exe or a Flatpak without them launches fine and then shows a blank hero
+    slot on the home screen.
+    """
+
+    ASSETS = sorted(os.listdir(os.path.join(REPO, "assets", "devices")))
+
+    def test_assets_exist(self):
+        self.assertTrue(self.ASSETS, "no device images in assets/devices")
+
+    def test_build_bat_bundles_the_assets(self):
+        build = read("windows", "build.bat")
+        self.assertIn("assets", build)
+        self.assertIn("--add-data", build,
+                      "PyInstaller is not told to bundle assets/")
+
+    def test_install_ps1_copies_the_assets(self):
+        self.assertIn("assets", read("windows", "install.ps1"))
+
+    def test_manifest_installs_every_asset(self):
+        manifest = read(TestFlatpakPackaging.MANIFEST)
+        for name in self.ASSETS:
+            self.assertIn(
+                f"install -Dm644 {name}", manifest,
+                f"Flatpak manifest has no install command for {name}")
+            self.assertIn(
+                f"path: ../assets/devices/{name}", manifest,
+                f"Flatpak manifest does not list {name} as a source")
 
 
 class TestWindowsPackaging(unittest.TestCase):
@@ -68,6 +119,28 @@ class TestFlatpakPackaging(unittest.TestCase):
             self.assertIn(
                 f"path: ../{mod}", manifest,
                 f"Flatpak manifest does not list {mod} as a source")
+
+    def test_manifest_installs_the_toolkit(self):
+        """The Flatpak has to carry PySide6; the runtime has no Python Qt.
+
+        This is the check that would have caught shipping a bundle that
+        launches straight into ModuleNotFoundError: No module named
+        'PySide6'.
+        """
+        manifest = read(self.MANIFEST)
+        self.assertIn("PySide6", manifest)
+        self.assertIn("shiboken6", manifest)
+
+    def test_wheel_sources_are_pinned_by_hash(self):
+        # An unpinned wheel URL makes the build non-reproducible and is a
+        # supply-chain hole; flatpak-builder requires the hash anyway.
+        manifest = read(self.MANIFEST)
+        wheels = [line for line in manifest.splitlines()
+                  if line.strip().startswith("url:") and ".whl" in line]
+        self.assertTrue(wheels, "no wheel sources found")
+        self.assertEqual(len(wheels),
+                         manifest.count("sha256:"),
+                         "a pinned wheel is missing its sha256")
 
     def test_manifest_referenced_files_exist(self):
         """Every `path:` in the manifest must resolve, relative to flatpak/."""
