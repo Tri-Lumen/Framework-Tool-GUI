@@ -14,14 +14,13 @@ this file to match the new real output, then fix the regex in parsers.py to
 match — don't just loosen the assertion.
 """
 
-import sys
 import os
+import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from parsers import parse_ports, detect_model  # noqa: E402
-
+from parsers import detect_model, parse_ports  # noqa: E402
 
 POWER_VV = """Charger Status
   AC is:            connected
@@ -128,8 +127,16 @@ VERSIONS_GARBAGE = "some completely unrecognized output\nwith no Type: line\n"
 
 class TestPowerParsers(unittest.TestCase):
     def test_charger_and_battery_fields(self):
-        from parsers import (RE_CHG_V, RE_CHG_A, RE_IN_A, RE_SOC,
-                              RE_LFCC, RE_DESIGN, RE_CYCLES, RE_AC)
+        from parsers import (
+            RE_AC,
+            RE_CHG_A,
+            RE_CHG_V,
+            RE_CYCLES,
+            RE_DESIGN,
+            RE_IN_A,
+            RE_LFCC,
+            RE_SOC,
+        )
         self.assertEqual(RE_CHG_V.search(POWER_VV).group(1), "17800")
         self.assertEqual(RE_CHG_A.search(POWER_VV).group(1), "2000")
         self.assertEqual(RE_IN_A.search(POWER_VV).group(1), "3084")
@@ -140,7 +147,7 @@ class TestPowerParsers(unittest.TestCase):
         self.assertIn("connected", RE_AC.search(POWER_VV).group(1))
 
     def test_battery_health_math(self):
-        from parsers import RE_LFCC, RE_DESIGN
+        from parsers import RE_DESIGN, RE_LFCC
         lfcc = int(RE_LFCC.search(POWER_VV).group(1))
         design = int(RE_DESIGN.search(POWER_VV).group(1))
         health = 100.0 * lfcc / design
@@ -149,7 +156,7 @@ class TestPowerParsers(unittest.TestCase):
 
 class TestThermalParser(unittest.TestCase):
     def test_temps_and_rpm(self):
-        from parsers import RE_TEMP, RE_RPM
+        from parsers import RE_RPM, RE_TEMP
         temps = dict(RE_TEMP.findall(THERMAL))
         self.assertEqual(temps["APU"], "62")
         self.assertEqual(temps["F75303_CPU"], "44")

@@ -33,11 +33,21 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import messagebox, scrolledtext, ttk
 
 from parsers import (
-    RE_CHG_V, RE_CHG_A, RE_IN_A, RE_SOC, RE_LFCC, RE_DESIGN, RE_CYCLES,
-    RE_AC, RE_RPM, RE_TEMP, parse_ports, detect_model,
+    RE_AC,
+    RE_CHG_A,
+    RE_CHG_V,
+    RE_CYCLES,
+    RE_DESIGN,
+    RE_IN_A,
+    RE_LFCC,
+    RE_RPM,
+    RE_SOC,
+    RE_TEMP,
+    detect_model,
+    parse_ports,
 )
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -300,7 +310,8 @@ class App(tk.Tk):
             self.charge_rate = tk.StringVar(value="1")
             ttk.Entry(f, textvariable=self.charge_rate, width=6).grid(row=r, column=1, sticky="w")
             ttk.Button(f, text="Set",
-                       command=lambda: self.run(["--charge-rate-limit", self.charge_rate.get().strip()])
+                       command=lambda: self.run(
+                           ["--charge-rate-limit", self.charge_rate.get().strip()])
                        ).grid(row=r, column=3, padx=2)
             r += 1
 
@@ -840,7 +851,8 @@ class App(tk.Tk):
     def tool_preset(self, limit, rate):
         self._append(f"=== Preset: charge limit {limit}%, rate {rate}C ===\n")
         rc, out = self._exec(["--charge-limit", str(limit)])
-        self._append(out.strip() + "\n" if out.strip() else f"Charge limit → {limit}% (exit {rc})\n")
+        self._append(out.strip() + "\n" if out.strip()
+                     else f"Charge limit → {limit}% (exit {rc})\n")
         rc, out = self._exec(["--charge-rate-limit", rate])
         self._append(out.strip() + "\n" if out.strip() else f"Rate limit → {rate}C (exit {rc})\n")
         rc, out = self._exec(["--charge-limit"])
