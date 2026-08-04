@@ -22,8 +22,12 @@ try {
     $RegKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrameworkGUI"
     # All of these are required: framework_gui.py imports the rest, and a
     # missing one only shows up as ModuleNotFoundError at launch.
-    $SrcFiles = @("framework_gui.py", "parsers.py", "power.py", "deps.py",
-                  "drivers.py") | ForEach-Object { Join-Path $Here "..\$_" }
+    $SrcFiles = @("framework_gui.py", "appstate.py", "backdrop.py",
+                  "deps.py", "device_images.py", "drivers.py",
+                  "module_icons.py", "navigation.py", "parsers.py",
+                  "power.py", "theme.py",
+                  "widgets.py") | ForEach-Object { Join-Path $Here "..\$_" }
+    $SrcAssets = Join-Path $Here "..\assets"
 
     Write-Host "== Framework System GUI installer =="
     Write-Host "Source: $Here"
@@ -49,6 +53,19 @@ try {
     }
     Write-Host "Using Python: $pythonw"
 
+    # 1b) PySide6, which the UI is built on. The script install runs from a
+    # system Python, so this is the one dependency it cannot assume; the
+    # packaged exe has it built in and needs none of this.
+    $python = Join-Path (Split-Path -Parent $pythonw) "python.exe"
+    & $python -c "import PySide6" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Installing PySide6 (the GUI toolkit) for this Python..."
+        & $python -m pip install --upgrade "PySide6-Essentials>=6.6"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not install PySide6. Install it by hand and re-run: python -m pip install PySide6-Essentials"
+        }
+    }
+
     # 2) framework_tool present?
     if (-not (Get-Command "framework_tool.exe" -ErrorAction SilentlyContinue)) {
         $ans = Read-Host "framework_tool not found. Install via winget now? [y/N]"
@@ -63,6 +80,10 @@ try {
         Copy-Item -LiteralPath (Resolve-Path $f) -Destination (Join-Path $AppDir $leaf) -Force
         Unblock-File -Path (Join-Path $AppDir $leaf) -ErrorAction SilentlyContinue
     }
+    if (-not (Test-Path $SrcAssets)) {
+        throw "assets\ not found - keep the folder structure from the repo intact."
+    }
+    Copy-Item -LiteralPath $SrcAssets -Destination $AppDir -Recurse -Force
     Write-Host "Installed app to $AppDir"
 
     # 4) Ship the uninstaller with the install, not only on the share the

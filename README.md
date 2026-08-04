@@ -3,9 +3,17 @@
 [![CI](https://github.com/Tri-Lumen/Framework-Tool-GUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Tri-Lumen/Framework-Tool-GUI/actions/workflows/ci.yml)
 
 A graphical user interface to be used in conjunction with the `framework_tool`
-Rust libraries — a Tkinter front-end for
+Rust libraries — a PySide6/Qt front-end for
 [framework_tool](https://github.com/FrameworkComputer/framework-system),
 packaged for Windows and Linux (Flatpak).
+
+The window is an icon rail (five groups) selecting a pane list (the sections
+inside that group), a content column, and a resizable output drawer that
+shows every command the app runs and what it printed, verbatim. It is dark
+only, with a translucent "acrylic" appearance where the platform can
+composite one and a flat opaque appearance everywhere else — the app probes
+at startup, forces opaque when it cannot, and says which one you have got in
+the status bar rather than leaving a translucent window over nothing.
 
 `framework_tool` itself must be installed on each target machine
 (Windows: `winget install framework_tool --source winget`; Linux: your
@@ -34,15 +42,23 @@ when a release is published and attaches the artifacts to it.
 ## Repository layout
 
 ```
-framework_gui.py   Tk app — UI, command execution, the 14 "Tools" workflows
+framework_gui.py   Qt app — layout, command execution, the 14 diagnostics
+widgets.py         Reusable UI pieces: cards, panels, bars, badges, the rail
+theme.py           Design tokens and the Qt style sheet built from them
+navigation.py      Rail/pane model and every capability-gated row
+appstate.py        The two UI choices that persist: appearance, drawer height
+backdrop.py        Can this platform composite a translucent window, and how
+device_images.py   Board string → which product photograph to show
+module_icons.py    Expansion-card marks, drawn as SVG paths rather than files
 parsers.py         Regex parsers + device detection
 power.py           CPU power-limit (TDP) backends: RyzenAdj, Linux powercap,
                    Windows powercfg
 deps.py            Registry of helper tools and how to install each one
 drivers.py         Catalog of Framework's per-build download pages
-                   (none of the four import tkinter, so all are unit-testable
-                   without a display)
-tests/             Parser tests, GUI smoke tests, packaging checks
+                   (only framework_gui.py and widgets.py import the toolkit,
+                   so everything else is unit-testable without a display)
+assets/devices/    Product photographs for the Overview, one per chassis
+tests/             Logic tests, GUI smoke tests, packaging checks
 windows/           PyInstaller build, Inno Setup script, install/uninstall
 flatpak/           Manifest, .desktop, launcher, icon, its own README
 .github/           CI, the release workflow, the shared Windows build action
@@ -83,6 +99,8 @@ Settings → Apps.
 **No-build alternative** (needs Python on every device):
 double-click `windows\install.cmd` — installs the Python script version
 with a run-as-admin Start Menu shortcut, uninstaller included the same way.
+It installs PySide6 into that Python if it is not already there; the
+packaged exe has the toolkit built in and needs none of this.
 
 **Uninstall:** Start Menu → Framework System GUI → *Uninstall Framework
 System GUI*, or Settings → Apps. Installs made by `FrameworkGUI-Setup.exe`
@@ -115,9 +133,10 @@ on every host.
 ## Beyond framework_tool
 
 `framework_tool` talks to the embedded controller, which does not own
-everything worth changing on these machines. Three tabs drive other tools:
+everything worth changing on these machines. Three sections drive other
+tools:
 
-**Power (TDP)** — sustained and boost power limits. The EC cannot set these,
+**CPU limits** — sustained and boost power limits. The EC cannot set these,
 so the app picks a backend from the CPU and OS:
 
 | Backend | CPU | OS | Sets |
@@ -129,14 +148,14 @@ so the app picks a backend from the CPU and OS:
 RyzenAdj and RAPL limits are **volatile**: a reboot clears them, and sleep or
 an AC/battery transition often does too. Re-applying automatically would need
 a service or scheduled task, which this project deliberately does not have —
-so the tab links to the documentation for making it stick with *the tool it
+so the pane links to the documentation for making it stick with *the tool it
 actually used*: a systemd unit for RyzenAdj or RAPL on Linux, a Task
 Scheduler task for RyzenAdj on Windows. `powercfg` is the exception: it edits
 the saved power scheme, so Windows restores it across reboots on its own, and
-the tab says so instead of telling you to re-apply it.
+the pane says so instead of telling you to re-apply it.
 
-ARM has no equivalent tool to shell out to, and the tab says that rather than
-showing dead controls.
+ARM has no equivalent tool to shell out to, and the pane says that rather
+than showing dead controls.
 
 **Setup** — detects the helper tools and installs them. Every install shows
 the exact command (or the page it will open) and waits for you to confirm;
@@ -147,7 +166,7 @@ helpers go in a per-user tools directory, never into the app's own install
 directory.
 
 **Drivers** — links, nothing more. Framework publishes one downloads list per
-device build, always carrying the current BIOS and driver bundle, so the tab
+device build, always carrying the current BIOS and driver bundle, so the pane
 opens the right one rather than trying to guess which file on the page you
 want. The detected build is offered at the top; every other build is in a
 dropdown below it, for when detection misses or you are fetching drivers for
@@ -157,37 +176,56 @@ separately.
 
 ## Device detection
 
-On launch (and via the "Rescan device" button) the GUI runs `--versions`
-once, parses the mainboard type, and shows only the controls that apply —
+On launch (and via the "Rescan device" button on the Overview) the GUI runs
+`--versions` once, parses the mainboard type, and shows only the controls
+that apply —
 e.g. stylus/touchscreen on Laptop 12, expansion bay on Laptop 16, RGB LEDs
 on Desktop, and battery/keyboard-light/fingerprint controls only on
 laptops (Desktop has none of those). If detection fails or the board
 string is not recognized, every control is shown rather than guessing.
 
+The Overview also shows a photograph of the detected machine so you can see
+at a glance whether the app got it right. Those are per *chassis*, not per
+mainboard — swapping the mainboard does not change what a Laptop 13 looks
+like — with two exceptions that do change the outside: the Laptop 13 Pro's
+black lid, and a Laptop 16 carrying a Graphics Module.
+
+The six stat cards and the expansion-bay panel need `--power`, `--thermal`
+and `--pdports` as well, which is three more elevated commands. When the app
+is already running as root it reads them on launch; behind `pkexec` that
+would mean three extra password prompts every time you open the window, so
+there it waits for you to press "Rescan device".
+
 ## Background footprint
 
 None. No services, timers, tray icons, or autostart entries. A process is
 spawned per button press and exits when the command finishes. This is why
-power limits do not survive a reboot — see the Power tab above.
+power limits do not survive a reboot — see the CPU limits section above.
 
 ## Running from source / development
 
 ```bash
-python3 framework_gui.py                             # needs python3-tk installed
-python3 -m unittest discover tests -v                # parser + packaging tests
+pip install -r requirements.txt                      # PySide6, the one dependency
+python3 framework_gui.py                             # run it
+python3 -m unittest discover tests -v                # logic + packaging tests
 xvfb-run -a python3 -m unittest discover tests -v    # full suite, headless Linux
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover tests -v   # or this
 ruff check .                                         # lint
 ```
 
-The GUI smoke tests skip themselves when no display is available (and on
-Windows, where their stub binary can't run), so the suite is safe to run
-anywhere.
+The GUI smoke tests skip themselves when PySide6 is missing or no Qt platform
+plugin will start (and on Windows, where their stub binary can't run), so the
+suite is safe to run anywhere. Qt's wheels bring Qt but not the X/EGL
+libraries it links against; on a bare Linux box install `libegl1 libgl1
+libxkbcommon-x11-0 libxcb-cursor0` and friends, as CI does.
 
-`framework_gui.py` is the Tk app; `parsers.py` holds the regex parsers and
-device-detection logic and has no tkinter dependency, so its tests run
-without a display. See `CLAUDE.md` for architecture notes, known gotchas,
-and what hasn't been verified yet (this project has not been run against
-real Framework hardware).
+Only `framework_gui.py` and `widgets.py` import the toolkit. Everything else
+— parsers, power, deps, drivers, navigation, theme, appstate, backdrop,
+device_images, module_icons — is standard library only and tested without a
+display, and `tests/test_packaging.py` fails if an import of PySide6 creeps
+into one of them. See `CLAUDE.md` for architecture notes, known gotchas, and
+what hasn't been verified yet (this project has not been run against real
+Framework hardware).
 
 ## Cutting a release
 

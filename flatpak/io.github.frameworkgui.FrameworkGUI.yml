@@ -1,14 +1,14 @@
 app-id: io.github.frameworkgui.FrameworkGUI
-runtime: org.freedesktop.Platform
-runtime-version: '24.08'
-sdk: org.freedesktop.Sdk
+runtime: org.kde.Platform
+runtime-version: '6.7'
+sdk: org.kde.Sdk
 command: framework-gui
 
 finish-args:
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland
-  # No --share=network on purpose. The Drivers tab only opens links (the
+  # No --share=network on purpose. The Drivers section only opens links (the
   # portal handles that, no network permission needed), and the one code
   # path that downloads anything — fetching a helper's GitHub release — is
   # Windows-only. Adding it back would widen the sandbox for nothing.
@@ -19,50 +19,34 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
 
 modules:
-  # Tk needs X11; runs under XWayland on Wayland sessions.
-  - name: tcl
-    buildsystem: autotools
-    subdir: unix
-    post-install:
-      - chmod 755 /app/lib/libtcl8.6.so
+  # The UI is PySide6. The wheels below carry Qt themselves, which is why
+  # this manifest no longer compiles anything from source — the Tcl, Tk and
+  # CPython modules the Tkinter version needed are gone, and with them the
+  # slowest part of the build.
+  #
+  # The runtime is org.kde rather than org.freedesktop because the KDE one
+  # already ships Qt 6 and its platform plugins (xcb, wayland) plus the
+  # fonts and icon theme they expect; on the plain freedesktop runtime the
+  # wheel's Qt starts but has no platform plugin to load.
+  - name: python3-pyside6
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-index --no-build-isolation
+        --find-links="file://${PWD}" --prefix=${FLATPAK_DEST}
+        shiboken6 PySide6-Essentials
     sources:
-      - type: archive
-        url: https://github.com/tcltk/tcl/archive/refs/tags/core-8-6-14.tar.gz
-        sha256: 186a75c524ad20ef0cbcf159253bfcb0510b3b2e605c05d2d7abe93351fa5636
-    cleanup:
-      - /man
-
-  - name: tk
-    buildsystem: autotools
-    subdir: unix
-    config-opts:
-      - --with-tcl=/app/lib
-    post-install:
-      - chmod 755 /app/lib/libtk8.6.so
-    sources:
-      - type: archive
-        url: https://github.com/tcltk/tk/archive/refs/tags/core-8-6-14.tar.gz
-        sha256: 0ee733c67d16a4283a2d7ce0524503228d57b9aa40bdf56538beebbab1ebc376
-    cleanup:
-      - /man
-
-  # The freedesktop runtime's Python has no tkinter, so build CPython
-  # against the tcl/tk above. Takes a few minutes once; cached afterwards.
-  - name: cpython
-    buildsystem: autotools
-    config-opts:
-      - --with-ensurepip=no
-    build-options:
-      env:
-        TCLTK_CFLAGS: -I/app/include
-        TCLTK_LIBS: -L/app/lib -ltcl8.6 -ltk8.6
-    sources:
-      - type: archive
-        url: https://github.com/python/cpython/archive/refs/tags/v3.12.7.tar.gz
-        sha256: 0c4db8f00ab490bfb5a4b0d0e763319d017226b5521f97e851412342ff04d459
-    cleanup:
-      - /lib/python3.12/test
-      - /lib/python3.12/idlelib
+      # Binary wheels, pinned by hash and fetched by flatpak-builder.
+      # PySide6-Essentials rather than the full PySide6: the app uses
+      # QtWidgets, QtGui, QtCore and QtSvg, and the extras (WebEngine, 3D,
+      # Charts) would roughly triple the bundle for nothing.
+      - type: file
+        url: https://files.pythonhosted.org/packages/b2/e9/5c0c67de510da7818703d01123f7998cc495e99c0e6979a6ed6eb2ee09d0/shiboken6-6.7.3-cp39-abi3-manylinux_2_28_x86_64.whl
+        sha256: f0852e5781de78be5b13c140ec4c7fb9734e2aaf2986eb2d6a224363e03efccc
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/8d/d8/a08ca6eca6839be5d604e4035ce899f9d6df0f612191f4ed4d03e51f1e0e/PySide6_Essentials-6.7.3-cp39-abi3-manylinux_2_28_x86_64.whl
+        sha256: cda6fd26aead48f32e57f044d18aa75dc39265b49d7957f515ce7ac3989e7029
+        only-arches: [x86_64]
 
   - name: framework-gui
     buildsystem: simple
@@ -70,10 +54,33 @@ modules:
       - install -Dm644 framework_gui.py /app/share/framework-gui/framework_gui.py
       # framework_gui.py imports these from its own directory - shipping it
       # without any one of them gives an app that dies on launch.
+      - install -Dm644 appstate.py /app/share/framework-gui/appstate.py
+      - install -Dm644 backdrop.py /app/share/framework-gui/backdrop.py
+      - install -Dm644 deps.py /app/share/framework-gui/deps.py
+      - install -Dm644 device_images.py /app/share/framework-gui/device_images.py
+      - install -Dm644 drivers.py /app/share/framework-gui/drivers.py
+      - install -Dm644 module_icons.py /app/share/framework-gui/module_icons.py
+      - install -Dm644 navigation.py /app/share/framework-gui/navigation.py
       - install -Dm644 parsers.py /app/share/framework-gui/parsers.py
       - install -Dm644 power.py /app/share/framework-gui/power.py
-      - install -Dm644 deps.py /app/share/framework-gui/deps.py
-      - install -Dm644 drivers.py /app/share/framework-gui/drivers.py
+      - install -Dm644 theme.py /app/share/framework-gui/theme.py
+      - install -Dm644 widgets.py /app/share/framework-gui/widgets.py
+      # The Overview's device photographs. device_images.py looks for them
+      # relative to the module directory, so they land beside it.
+      - install -Dm644 desktop.png
+        /app/share/framework-gui/assets/devices/desktop.png
+      - install -Dm644 laptop-12.png
+        /app/share/framework-gui/assets/devices/laptop-12.png
+      - install -Dm644 laptop-13.png
+        /app/share/framework-gui/assets/devices/laptop-13.png
+      - install -Dm644 laptop-13-pro.png
+        /app/share/framework-gui/assets/devices/laptop-13-pro.png
+      - install -Dm644 laptop-16.png
+        /app/share/framework-gui/assets/devices/laptop-16.png
+      - install -Dm644 laptop-16-gpu.png
+        /app/share/framework-gui/assets/devices/laptop-16-gpu.png
+      - install -Dm644 unknown.png
+        /app/share/framework-gui/assets/devices/unknown.png
       - install -Dm755 framework-gui /app/bin/framework-gui
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.desktop
         /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
@@ -85,13 +92,41 @@ modules:
       - type: file
         path: ../framework_gui.py
       - type: file
+        path: ../appstate.py
+      - type: file
+        path: ../backdrop.py
+      - type: file
+        path: ../deps.py
+      - type: file
+        path: ../device_images.py
+      - type: file
+        path: ../drivers.py
+      - type: file
+        path: ../module_icons.py
+      - type: file
+        path: ../navigation.py
+      - type: file
         path: ../parsers.py
       - type: file
         path: ../power.py
       - type: file
-        path: ../deps.py
+        path: ../theme.py
       - type: file
-        path: ../drivers.py
+        path: ../widgets.py
+      - type: file
+        path: ../assets/devices/desktop.png
+      - type: file
+        path: ../assets/devices/laptop-12.png
+      - type: file
+        path: ../assets/devices/laptop-13.png
+      - type: file
+        path: ../assets/devices/laptop-13-pro.png
+      - type: file
+        path: ../assets/devices/laptop-16.png
+      - type: file
+        path: ../assets/devices/laptop-16-gpu.png
+      - type: file
+        path: ../assets/devices/unknown.png
       - type: file
         path: ../LICENSE
       - type: file

@@ -1,22 +1,23 @@
 """
-End-to-end smoke tests for the Tk app: launch App() for real, drive it
-through an actual mainloop() (not manual .update() polling — Tkinter only
-marshals cross-thread Tk calls while mainloop() is really running, so
-polling with .update() produces a spurious
-"RuntimeError: main thread is not in main loop"), point it at a stub
-framework_tool script, and assert on the capability dict + which tab
-widgets survive gating.
+End-to-end smoke tests for the Qt app: build App() for real, run an actual
+event loop, point it at a stub framework_tool script, and assert on the
+capability dict plus which controls survive gating.
 
-Requires a display. On headless Linux:
+Qt has no equivalent of Tkinter's cross-thread marshalling problem, but the
+same shape of test still applies: the device scan runs on a worker thread and
+reports back through a signal, so the test has to let the event loop run
+until the signal has been delivered rather than polling the app object.
 
+Needs a display (or Qt's offscreen platform). On headless Linux either of:
+
+    QT_QPA_PLATFORM=offscreen python3 -m unittest tests.test_smoke_gui -v
     xvfb-run -a python3 -m unittest tests.test_smoke_gui -v
 
-Skips automatically if tkinter can't open a display (e.g. plain CI without
-Xvfb), and on Windows, where the POSIX stub binary can't run — rather than
-failing the whole suite in either case.
+Skips automatically if PySide6 is missing or no platform plugin will start,
+and on Windows, where the POSIX stub binary cannot run - rather than failing
+the whole suite in either case.
 """
 
-import gc
 import os
 import stat
 import sys
@@ -26,23 +27,40 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-try:
-    import tkinter as tk
-    _tk_root = tk.Tk()
-    _tk_root.destroy()
-    TK_AVAILABLE = True
-except Exception:  # noqa: BLE001 — no display, no tkinter, etc.
-    TK_AVAILABLE = False
-
 # The stub binary below is an extension-less script with a shebang: Windows
 # neither resolves it via PATHEXT nor executes it, so these tests are POSIX
-# only. Skipped rather than failed on Windows — test_parsers.py and
-# test_packaging.py still cover the logic there.
+# only. Skipped rather than failed on Windows - the logic modules' own tests
+# still cover the gating rules there.
 STUB_SUPPORTED = not sys.platform.startswith("win")
-CAN_RUN = TK_AVAILABLE and STUB_SUPPORTED
+
+# The app persists its appearance and drawer height through appstate.py,
+# which reads the environment for the config location. Point that at a
+# throwaway directory before importing anything: without this the tests
+# rewrite the settings of whoever is running them, and the drawer-clamp test
+# in particular would leave their drawer at its 70px minimum.
+_CONFIG_DIR = tempfile.mkdtemp(prefix="framework-gui-tests-")
+os.environ["XDG_CONFIG_HOME"] = _CONFIG_DIR
+os.environ["LOCALAPPDATA"] = _CONFIG_DIR
+
+QT_AVAILABLE = False
+if STUB_SUPPORTED:
+    # A headless runner has no display; offscreen is the platform plugin
+    # that needs none, and it renders the same widget tree.
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+
+        _probe = QApplication.instance() or QApplication([])
+        QT_AVAILABLE = True
+    except Exception:  # noqa: BLE001 - no PySide6, no platform plugin, ...
+        QT_AVAILABLE = False
+
+CAN_RUN = QT_AVAILABLE and STUB_SUPPORTED
 
 if CAN_RUN:
     import framework_gui as fg  # noqa: E402
+    import navigation  # noqa: E402
 
 
 def make_stub_binary(tmpdir, versions_output):
@@ -50,88 +68,100 @@ def make_stub_binary(tmpdir, versions_output):
     placeholder for anything else, then return the directory to prepend to
     PATH."""
     path = os.path.join(tmpdir, "framework_tool")
-    script = textwrap.dedent(f'''\
+    script = textwrap.dedent('''\
         #!/usr/bin/env python3
         import sys
         if "--versions" in sys.argv:
-            print({versions_output!r})
+            print({versions!r})
+            sys.exit(0)
+        if "--version" in sys.argv:
+            print("framework_tool 0.4.2")
             sys.exit(0)
         print("stub output")
         sys.exit(0)
-        ''')
+        ''').format(versions=versions_output)
     with open(path, "w") as fh:
         fh.write(script)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP
+             | stat.S_IXOTH)
     return tmpdir
 
 
 # Generous: the first run in a cold environment pays for .pyc compilation
 # and for spawning the stub binary (itself a Python process). A tight
 # timeout here shows up as a flaky, hard-to-read failure in CI, not as a
-# faster test run — the watcher quits the loop as soon as detection lands.
+# faster test run - the watcher quits the loop as soon as detection lands.
 DETECT_TIMEOUT_MS = 30000
 
 
-def _drive_app(timeout_ms):
-    """Run a real App through a real mainloop() until device detection has
-    settled, then snapshot caps + the buttons on each tab.
+def buttons_in(widget):
+    """Every button label under a widget, in tree order."""
+    return [b.text() for b in widget.findChildren(QPushButton) if b.text()]
 
-    Returns (caps, tab_name -> [button texts]) as one dict. Raises if
-    detection never completed, so a timeout reads as a timeout rather than
-    as a KeyError further down the test."""
-    app = fg.App()
+
+def labels_in(widget):
+    """Every non-empty QLabel string under a widget."""
+    from PySide6.QtWidgets import QLabel
+    return [le.text() for le in widget.findChildren(QLabel) if le.text()]
+
+
+def _drive_app(timeout_ms):
+    """Run a real App through a real event loop until the device scan has
+    settled, then snapshot caps and the controls on each section.
+
+    Raises if detection never completed, so a timeout reads as a timeout
+    rather than as a KeyError further down the test.
+    """
+    app = QApplication.instance() or QApplication([])
+    window = fg.App()
     results = {}
 
     def snapshot():
-        results["caps"] = dict(app.caps)
-        results["cpu"] = dict(app.cpu)
-        results["driver_entry"] = dict(app._driver_entry)
-        results["driver_all"] = list(app._driver_all)
-        results["power_backend"] = app.power_backend
-        results["detected_var"] = app.detected_var.get()
-        results["tabs"] = [app.nb.tab(t, "text") for t in app.nb.tabs()]
-        for tab_id in app.nb.tabs():
-            name = app.nb.tab(tab_id, "text")
-            frame = app.nb.nametowidget(tab_id)
-            results[name] = [
-                w["text"] for w in frame.winfo_children()
-                if isinstance(w, fg.ttk.Button)
-            ]
+        results["caps"] = dict(window.caps)
+        results["cpu"] = dict(window.cpu)
+        results["driver_entry"] = dict(window.driver_entry)
+        results["driver_all"] = list(window.driver_all)
+        results["power_backend"] = window.power_backend
+        results["tool_keys"] = sorted(window.tool_rows)
+        results["port_keys"] = sorted(window.port_buttons)
+        results["settings_keys"] = sorted(window.settings_widgets)
+        results["sections"] = sorted(window.pages)
+        results["title"] = window.windowTitle()
+        results["tool_version"] = window.tool_version
+        results["firmware"] = dict(window.firmware)
+        for section, page in window.pages.items():
+            results["buttons:" + section] = buttons_in(page)
+            results["labels:" + section] = labels_in(page)
 
     def watcher():
         # "Detecting…" is the pre-scan placeholder; anything else means the
         # scan thread has reported back (success or fail-open).
-        if app.caps.get("model") != "Detecting…":
+        if window.caps.get("model") != "Detecting…":
             snapshot()
             app.quit()
         else:
-            app.after(50, watcher)
+            QTimer.singleShot(50, watcher)
 
-    app.after(50, watcher)
-    timeout_id = app.after(timeout_ms, app.quit)  # safety net against a hang
-    app.mainloop()
+    QTimer.singleShot(50, watcher)
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(app.quit)
+    timeout.start(timeout_ms)
+    app.exec()
 
-    # Tear down deliberately. Each test builds a fresh App (a fresh Tk
-    # interpreter) in the same process, and leftovers from the previous one
-    # are not harmless: a pending `after` callback fires against a dead
-    # interpreter ("invalid command name ...quit"), and Tk variables left for
-    # the GC to reap whenever it likes get their __del__ — which calls into
-    # Tcl — run at an arbitrary later moment, possibly from the *next* app's
-    # worker thread. That corrupts Tcl's async state and the next app's
-    # device scan then never lands, i.e. an intermittent 30-second timeout in
-    # whichever test happens to run later. Cancel, destroy, and collect here,
-    # on the main thread with no mainloop running, so it can't happen there.
-    try:
-        app.after_cancel(timeout_id)
-    except tk.TclError:
-        pass
-    app.destroy()
-    app = None  # drop the last strong reference before collecting
-    gc.collect()
+    # Each test builds a fresh App in the same process. Qt cleans up on
+    # deletion, but the window has to go before the next one is built or
+    # the two share the application's style sheet and the second one's
+    # assertions read the first one's widgets.
+    timeout.stop()
+    window.close()
+    window.deleteLater()
+    app.processEvents()
 
     if "caps" not in results:
         raise AssertionError(
-            f"device detection did not complete within {timeout_ms} ms")
+            "device detection did not complete within {} ms".format(
+                timeout_ms))
     return results
 
 
@@ -150,6 +180,8 @@ def run_app_and_capture(versions_output, timeout_ms=DETECT_TIMEOUT_MS):
 
 VERSIONS_L12 = """Mainboard Hardware
   Type:           Laptop 12 (13th Gen Intel Core)
+EC Firmware
+  Build version: hx20 0.0.9
 Touchscreen
   Firmware Version: v7.0.0.5.0.0.0.0
 Stylus
@@ -169,7 +201,7 @@ VERSIONS_DESKTOP = """Mainboard Hardware
 
 @unittest.skipUnless(
     CAN_RUN,
-    "no display available for tkinter" if STUB_SUPPORTED
+    "PySide6 unavailable or no Qt platform plugin" if STUB_SUPPORTED
     else "stub framework_tool binary is POSIX-only")
 class TestGuiSmoke(unittest.TestCase):
 
@@ -180,8 +212,10 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertTrue(caps["is_laptop12"])
         self.assertTrue(caps["has_touchscreen"])
         self.assertTrue(caps["has_stylus"])
-        self.assertEqual(len(r["Tools"]), 14)
-        self.assertIn("Power input wattage", r["Tools"])
+        self.assertEqual(len(r["tool_keys"]), 14)
+        self.assertIn("input_power", r["tool_keys"])
+        self.assertIn("tablet_mode", r["settings_keys"])
+        self.assertIn("touchscreen", r["settings_keys"])
 
     def test_laptop16_hides_stylus_shows_expansion_bay(self):
         r = run_app_and_capture(VERSIONS_L16)
@@ -189,48 +223,63 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertTrue(caps["has_expansion_bay"])
         self.assertFalse(caps["has_touchscreen"])
         self.assertFalse(caps["has_stylus"])
-        self.assertIn("Expansion bay (L16)", r["Ports & Modules"])
-        self.assertNotIn("Stylus battery", r["Ports & Modules"])
-        self.assertEqual(len(r["Tools"]), 14)  # is_laptop -> nothing hidden
+        self.assertIn("expansion_bay", r["port_keys"])
+        self.assertNotIn("stylus", r["port_keys"])
+        self.assertEqual(len(r["tool_keys"]), 14)  # is_laptop: nothing hidden
 
     def test_desktop_hides_battery_tools_shows_rgb(self):
         r = run_app_and_capture(VERSIONS_DESKTOP)
         caps = r["caps"]
         self.assertFalse(caps["is_laptop"])
         self.assertTrue(caps["has_rgbkbd"])
-        hidden = ("Power input wattage", "Battery health report",
-                  "Charging speed check", "Keyboard backlight sweep",
-                  "Fingerprint LED test", "Preset: Longevity (limit 80%)",
-                  "Preset: Full charge (100%)")
-        for label in hidden:
-            self.assertNotIn(label, r["Tools"])
-        self.assertEqual(len(r["Tools"]), 7)
-        self.assertNotIn("Power / battery", r["Info"])
-        self.assertNotIn("Expansion bay (L16)", r["Ports & Modules"])
+        for key in ("input_power", "battery_health", "charge_speed",
+                    "kblight_sweep", "fpled_cycle", "preset_longevity",
+                    "preset_full"):
+            self.assertNotIn(key, r["tool_keys"])
+        self.assertEqual(len(r["tool_keys"]), 7)
+        self.assertNotIn("expansion_bay", r["port_keys"])
+        self.assertEqual(r["settings_keys"], ["rgbkbd"])
 
-    def test_helper_tool_tabs_are_always_present(self):
-        # Power/Setup/Drivers drive tools other than framework_tool, so they
-        # are not gated on the board model the way the other tabs are.
+    def test_every_section_is_built(self):
         r = run_app_and_capture(VERSIONS_L16)
-        for tab in ("Power (TDP)", "Setup", "Drivers"):
-            self.assertIn(tab, r["tabs"])
-        self.assertIn("Open downloads list", r["Drivers"])
-        self.assertIn("Re-check what is installed", r["Setup"])
+        self.assertEqual(r["sections"], sorted(navigation.SECTIONS))
 
-    def test_drivers_tab_offers_every_build_not_just_the_detected_one(self):
+    def test_helper_tool_sections_are_never_gated(self):
+        # CPU limits/Setup/Drivers drive tools other than framework_tool, so
+        # they are not gated on the board model the way the others are.
+        r = run_app_and_capture(VERSIONS_DESKTOP)
+        for section in ("power", "setup", "drivers"):
+            self.assertIn(section, r["sections"])
+        self.assertIn("Open downloads list", r["buttons:drivers"])
+        self.assertIn("Re-check what is installed", r["buttons:setup"])
+
+    def test_window_title_names_the_device(self):
         r = run_app_and_capture(VERSIONS_L16)
-        # The detected build is the top button; the rest are in the dropdown.
-        self.assertIn(r["driver_entry"]["label"], r["Drivers"])
+        # Overview is the section selected at launch, and it titles the
+        # window with the chassis rather than the section name.
+        self.assertEqual(r["title"], "Framework System GUI — Laptop 16")
+
+    def test_overview_reads_the_firmware_versions(self):
+        r = run_app_and_capture(VERSIONS_L12)
+        self.assertEqual(r["firmware"]["ec"], "hx20 0.0.9")
+
+    def test_status_bar_learns_the_tool_version(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        self.assertEqual(r["tool_version"], "0.4.2")
+
+    def test_drivers_offers_every_build_not_just_the_detected_one(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        self.assertIn(r["driver_entry"]["label"], r["buttons:drivers"])
         self.assertEqual(len(r["driver_all"]), len(fg.drivers.CATALOG) + 1)
 
-    def test_drivers_tab_matches_the_detected_board(self):
+    def test_drivers_matches_the_detected_board(self):
         r = run_app_and_capture(VERSIONS_L16)
         entry = r["driver_entry"]
         self.assertTrue(entry["exact"])
         self.assertIn("laptop-16", entry["url"])
         self.assertIn("7040", entry["url"])
 
-    def test_drivers_tab_falls_back_when_the_board_is_unknown(self):
+    def test_drivers_falls_back_when_the_board_is_unknown(self):
         with tempfile.TemporaryDirectory() as empty_dir:
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = empty_dir
@@ -238,21 +287,27 @@ class TestGuiSmoke(unittest.TestCase):
                 r = _drive_app(DETECT_TIMEOUT_MS)
             finally:
                 os.environ["PATH"] = old_path
-        # No framework_tool, so no board string — the tab still offers the
+        # No framework_tool, so no board string - the pane still offers the
         # index of every download rather than showing nothing.
         self.assertFalse(r["driver_entry"]["exact"])
-        self.assertIn("Open downloads list", r["Drivers"])
+        self.assertIn("Open downloads list", r["buttons:drivers"])
 
-    def test_power_tab_reports_a_backend_or_explains_itself(self):
+    def test_power_reports_a_backend_or_explains_itself(self):
         r = run_app_and_capture(VERSIONS_DESKTOP)
         backend = r["power_backend"]
         if backend is None:
-            # No usable backend on this test machine: the tab must offer the
-            # way forward instead of a dead end.
-            self.assertIn("Open the Setup tab", r["Power (TDP)"])
+            # No usable backend on this machine: the pane must offer the way
+            # forward instead of a dead end.
+            self.assertIn("Open the Setup section", r["buttons:power"])
         else:
             self.assertIn(backend, fg.power.BACKENDS)
-            self.assertIn("Apply limits", r["Power (TDP)"])
+            self.assertIn("Apply limits", r["buttons:power"])
+
+    def test_console_blocks_the_flash_flags_in_writing(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        blocked = [t for t in r["labels:console"] if "--flash-ec" in t]
+        self.assertTrue(blocked, "the console pane does not say what is "
+                                 "blocked")
 
     def test_binary_missing_fails_open(self):
         # Point PATH somewhere with no framework_tool at all.
@@ -260,18 +315,101 @@ class TestGuiSmoke(unittest.TestCase):
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = empty_dir
             try:
-                results = _drive_app(DETECT_TIMEOUT_MS)
+                r = _drive_app(DETECT_TIMEOUT_MS)
             finally:
                 os.environ["PATH"] = old_path
 
-        caps = results["caps"]
+        caps = r["caps"]
         self.assertFalse(caps["detected"])
         self.assertTrue(caps["is_laptop"])
         self.assertTrue(caps["has_touchscreen"])
         self.assertTrue(caps["has_stylus"])
         self.assertTrue(caps["has_expansion_bay"])
-        self.assertEqual(len(results["Tools"]), 14)
-        self.assertEqual(len(results["Ports & Modules"]), 9)
+        self.assertEqual(len(r["tool_keys"]), 14)
+        self.assertEqual(len(r["port_keys"]), 9)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestAppearance(unittest.TestCase):
+    """The acrylic toggle, and the rule that it never lies about itself."""
+
+    def test_opaque_is_forced_when_the_platform_cannot_composite(self):
+        window = fg.App()
+        try:
+            window.compositing = False
+            window._set_appearance(fg.theme.ACRYLIC)
+            # The request is refused, not honoured-and-hidden: a translucent
+            # surface with nothing behind it is worse than an opaque one.
+            self.assertEqual(window.appearance, fg.theme.OPAQUE)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_the_toggle_flips_and_the_status_bar_agrees(self):
+        window = fg.App()
+        try:
+            window.compositing = True
+            window.segment.set_choices_enabled(True)
+            window._set_appearance(fg.theme.ACRYLIC)
+            self.assertEqual(window.status_appearance.text(), "Acrylic on")
+            window._toggle_appearance()
+            self.assertEqual(window.appearance, fg.theme.OPAQUE)
+            self.assertEqual(window.status_appearance.text(), "Opaque")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_the_drawer_height_stays_inside_its_bounds(self):
+        window = fg.App()
+        try:
+            window._resize_drawer(10000)
+            self.assertEqual(window.drawer_height, fg.theme.DRAWER_MAX)
+            window._resize_drawer(-5)
+            self.assertEqual(window.drawer_height, fg.theme.DRAWER_MIN)
+        finally:
+            window.close()
+            window.deleteLater()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestNavigationWiring(unittest.TestCase):
+
+    def test_selecting_a_rail_group_selects_its_first_section(self):
+        window = fg.App()
+        try:
+            for group in navigation.RAIL_GROUPS:
+                window._select_rail(group["key"])
+                self.assertEqual(window.section, group["items"][0][1])
+                self.assertEqual(window.rail_key, group["key"])
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_every_section_can_be_shown(self):
+        window = fg.App()
+        try:
+            for section in navigation.SECTIONS:
+                window._select_section(section)
+                self.assertEqual(window.section, section)
+                self.assertIs(window.stack.currentWidget(),
+                              window.pages[section])
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_the_pane_list_follows_the_rail(self):
+        window = fg.App()
+        try:
+            window._select_section("settings")
+            combo = window.section_combo
+            self.assertEqual(
+                [combo.itemData(i) for i in range(combo.count())],
+                [key for _label, key in
+                 navigation.group_for_section("settings")["items"]])
+            self.assertIsInstance(combo, QComboBox)
+        finally:
+            window.close()
+            window.deleteLater()
 
 
 if __name__ == "__main__":

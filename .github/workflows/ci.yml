@@ -13,12 +13,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # System Python + python3-tk rather than actions/setup-python: the GUI
-      # smoke tests need a real tkinter, and Xvfb gives them a display.
-      - name: Install tkinter and Xvfb
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Qt's wheels bring Qt itself but not the X/EGL libraries it links
+      # against, and a runner image has none of them. Without these the
+      # smoke tests skip themselves silently, which would look green while
+      # testing nothing.
+      - name: Install Qt's system libraries and Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk xvfb
+          sudo apt-get install -y xvfb libegl1 libgl1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 \
+            libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
+            libdbus-1-3 libfontconfig1 fonts-dejavu-core
+
+      - name: Install PySide6
+        run: pip install -r requirements.txt
 
       - name: Run test suite
         run: xvfb-run -a python3 -m unittest discover tests -v
@@ -47,7 +59,8 @@ jobs:
           python-version: "3.12"
 
       # The GUI smoke tests skip themselves here (their stub binary is
-      # POSIX-only); the parser and packaging tests do run.
+      # POSIX-only); every logic and packaging test does run, and none of
+      # them needs the toolkit, so this deliberately installs nothing.
       - name: Run test suite
         run: python -m unittest discover tests -v
 
