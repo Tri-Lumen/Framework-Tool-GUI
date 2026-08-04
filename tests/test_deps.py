@@ -151,13 +151,20 @@ class TestToolsDir(unittest.TestCase):
         got = deps.tools_dir({"LOCALAPPDATA": r"C:\Users\x\AppData\Local"})
         self.assertTrue(got.endswith(os.path.join("FrameworkGUI", "tools")))
 
+    # Expected values are built with os.path.join, not written as POSIX
+    # literals: this suite also runs on the Windows CI runner, where
+    # os.path.join joins with a backslash whatever the inputs look like.
+
     def test_linux_honours_xdg(self):
         got = deps.tools_dir({"XDG_DATA_HOME": "/home/x/.local/share"})
-        self.assertEqual(got, "/home/x/.local/share/framework-gui/tools")
+        self.assertEqual(
+            got, os.path.join("/home/x/.local/share", "framework-gui", "tools"))
 
     def test_linux_default(self):
         got = deps.tools_dir({"HOME": "/home/x"})
-        self.assertEqual(got, "/home/x/.local/share/framework-gui/tools")
+        self.assertEqual(
+            got, os.path.join("/home/x", ".local", "share", "framework-gui",
+                              "tools"))
 
 
 class TestArchiveSafety(unittest.TestCase):
