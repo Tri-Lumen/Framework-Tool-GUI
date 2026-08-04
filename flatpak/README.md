@@ -3,6 +3,13 @@
 Build once on any Linux machine, produce a `.flatpak` bundle, install that
 single file everywhere else with one command.
 
+## You probably don't need to build this yourself
+
+Every published GitHub Release carries a prebuilt bundle
+([`FrameworkGUI.flatpak`](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI.flatpak),
+built by `.github/workflows/release.yml`). Download it and skip to
+"Install on any device". The rest of this file is for building from source.
+
 ## IMPORTANT: do not build on an SMB/CIFS mount
 
 flatpak-builder uses OSTree, which requires hardlinks and extended
@@ -39,6 +46,14 @@ flatpak install --user /path/to/share/FrameworkGUI.flatpak
 ```
 
 Launch "Framework System GUI" from the app menu.
+
+## Uninstall
+
+Flatpak is the uninstaller here - there is no separate script:
+
+```bash
+flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
+```
 
 ## Notes
 

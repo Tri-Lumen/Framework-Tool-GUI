@@ -35,11 +35,19 @@ tests/test_smoke_gui.py Full-app tests: real App(), real mainloop(), stub CLI
                         Needs a display (xvfb-run on headless Linux); skips
                         itself on Windows (the stub binary is POSIX-only).
 tests/test_packaging.py Asserts every app module is carried by every packaging
-                        path. No display, no build tooling needed.
+                        path, that every install path leaves an uninstaller and
+                        a Start Menu entry, and that the release workflow
+                        produces exactly the assets the README links. No
+                        display, no build tooling needed.
 windows/               build.bat (PyInstaller), installer.iss (Inno Setup),
                         install.ps1 / install-exe.ps1 (+ .cmd wrappers), uninstall
 flatpak/               manifest, .desktop, launcher script, icon, its own README
-.github/workflows/ci.yml  Linux tests (Xvfb), ruff lint, real Windows exe build
+.github/workflows/ci.yml       Linux tests (Xvfb), ruff lint, Windows build
+.github/workflows/release.yml  Fires on release published: Windows exe +
+                        installer, Flatpak bundle, uploaded to the release
+.github/actions/build-windows  Composite action shared by both workflows so
+                        the released artifact is the one CI exercised
+LICENSE                MIT
 README.md              User-facing install/usage instructions
 ```
 
@@ -194,30 +202,35 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   a real Framework device, that's the highest-value next step: run each
   Info/Tools button and diff actual output against the samples in
   `tests/test_parsers.py`.
-- **`windows/build.bat` now runs for real in CI** (the `windows-build` job
-  invokes the script itself, not a reimplementation, and uploads the
-  resulting `FrameworkGUI.exe` as an artifact) — so a green badge means the
-  exe *builds*. It does not mean anyone has *launched* that exe on a real
+- **`windows/build.bat` now runs for real in CI** (via the
+  `.github/actions/build-windows` composite action, which invokes the script
+  itself rather than a reimplementation, and CI uploads the resulting
+  `FrameworkGUI.exe` + `FrameworkGUI-Setup.exe`) — so a green badge means
+  both *build*. It does not mean anyone has *launched* them on a real
   Windows desktop: the `--uac-admin` self-elevation, the Start Menu
-  shortcut scripts (`install.ps1` / `install-exe.ps1`), and the whole
+  shortcut/uninstaller scripts (`install.ps1` / `install-exe.ps1` /
+  `uninstall.ps1`), the Apps & features registration and the whole
   Mark-of-the-Web/SMB story are still unexercised.
-- **`windows/installer.iss` has never been compiled.** No Inno Setup in CI;
-  a syntax error there would only show up on first real use.
-- **`flatpak/io.github.frameworkgui.FrameworkGUI.yml` has never actually
-  been built with `flatpak-builder`.** The tcl/tk/cpython source URLs and
-  sha256 hashes *were* verified by actually downloading those exact
-  archives and hashing them during development, so the build inputs are
-  correct — but the manifest's build steps, `finish-args`, and the
-  `flatpak-spawn --host` runtime behavior have not been exercised. CI only
-  checks the manifest's *structure* (`tests/test_packaging.py`: every
-  referenced path exists, every app module is installed); a real
-  flatpak-builder run compiles Tcl/Tk and CPython from source and was
-  judged too slow to put on every push. Add it as a
-  `workflow_dispatch`/nightly job if you want it.
+- **`windows/installer.iss` now compiles in CI** (same composite action
+  installs Inno Setup if the runner image lacks it), so syntax errors show
+  up on push. Nobody has *run* the resulting `FrameworkGUI-Setup.exe`: the
+  install/uninstall round trip, the Start Menu group and the `AppId`-based
+  upgrade path are unverified.
+- **`flatpak/io.github.frameworkgui.FrameworkGUI.yml` is now built by
+  `.github/workflows/release.yml`** (release-published and
+  `workflow_dispatch`, not on every push — it compiles Tcl/Tk and CPython
+  from source). It had never been built when that job was written, so the
+  first run may well fail; rehearse it with `workflow_dispatch` before
+  relying on a release. `tests/test_packaging.py` still only checks the
+  manifest's *structure*, and the `flatpak-spawn --host` runtime behavior
+  remains unexercised regardless of whether the build goes green.
+- **The release workflow itself has never fired.** The
+  `gh release upload` steps, the tag→version derivation and the
+  `/releases/latest/download/...` links in the README all go live the first
+  time a release is published. A `workflow_dispatch` run exercises
+  everything except the upload.
 - The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
   crude placeholder, not real artwork.
-- No LICENSE file yet — the repo is "all rights reserved" by default until
-  one is added. Pick one before making this public.
 
 ## Deliberately out of scope
 
@@ -232,16 +245,38 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   requirement). If this comes back, treat it as a separate feature
   decision, not an oversight to quietly fix.
 
+## Releasing
+
+Publishing a GitHub Release (tag `vX.Y.Z`) triggers
+`.github/workflows/release.yml`, which builds and attaches three assets:
+
+| Asset | Built by |
+|---|---|
+| `FrameworkGUI-Setup.exe` | `windows/installer.iss` via Inno Setup |
+| `FrameworkGUI.exe` | `windows/build.bat` via PyInstaller |
+| `FrameworkGUI.flatpak` | `flatpak/…FrameworkGUI.yml` via flatpak-builder |
+
+**Those three filenames are a contract**: README links
+`/releases/latest/download/<name>` for each, and
+`tests/test_packaging.py` fails if the workflow and the README disagree.
+Rename an asset in one place and you must rename it in both.
+
+The version comes from the tag with any leading `v` stripped, and is passed
+to Inno as `/DAppVersion=`. Manual `workflow_dispatch` runs build everything
+under version `0.0.0-dev` and skip only the upload — use that to rehearse,
+especially the Flatpak job, which had never been run when it was written.
+
 ## Suggested next steps, roughly in priority order
 
 1. Get access to a real Framework device (any model) and validate the
    parsers/detection against real `--versions`/`--power`/`--thermal`/
    `--pdports` output. This is the single highest-value thing to do next.
-2. Install the CI-built exe on a real Windows machine (Start Menu shortcut,
-   UAC self-elevation, running it from an SMB share) — CI proves it builds,
-   nothing yet proves it runs.
-3. Actually run `flatpak-builder` against the manifest and fix whatever
-   breaks, then consider a `workflow_dispatch` CI job for it.
-4. Compile `windows/installer.iss` with Inno Setup once.
+2. Rehearse `.github/workflows/release.yml` with `workflow_dispatch` and fix
+   whatever the Flatpak job turns up — it is the one build step that had
+   never executed anywhere before it was added.
+3. Run `FrameworkGUI-Setup.exe` on a real Windows machine: install,
+   Start Menu group, uninstall, reinstall over the top. CI proves it
+   compiles, nothing yet proves it installs.
+4. Same for the script installers (`install-exe.cmd`) from an SMB share,
+   including the uninstaller they now drop in `%LOCALAPPDATA%\FrameworkGUI`.
 5. Real app icon for the Flatpak `.desktop`/icon file.
-6. Decide on a LICENSE.

@@ -1,0 +1,53 @@
+name: Build Windows artifacts
+description: >-
+  Runs windows/build.bat to produce FrameworkGUI.exe, then compiles
+  windows/installer.iss with Inno Setup to produce FrameworkGUI-Setup.exe.
+  Both outputs land in windows/dist/.
+
+inputs:
+  version:
+    description: Version stamped into the installer (no leading "v").
+    required: false
+    default: "0.0.0"
+
+runs:
+  using: composite
+  steps:
+    # Runs the real build script, not a reimplementation of it, so a broken
+    # build.bat fails CI instead of failing a user.
+    - name: Build FrameworkGUI.exe
+      shell: cmd
+      env:
+        FWGUI_NO_PAUSE: "1"
+      run: windows\build.bat
+
+    - name: Check the exe was produced
+      shell: pwsh
+      run: |
+        if (-not (Test-Path windows\dist\FrameworkGUI.exe)) {
+          throw "windows\dist\FrameworkGUI.exe was not produced"
+        }
+        Get-Item windows\dist\FrameworkGUI.exe | Format-List Name, Length
+
+    # The hosted runner image usually ships Inno Setup 6; install it only if
+    # it is missing so this keeps working if the image drops it.
+    - name: Ensure Inno Setup is available
+      shell: pwsh
+      run: |
+        $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        if (-not (Test-Path $iscc)) {
+          Write-Host "Inno Setup not found in the image; installing via choco."
+          choco install innosetup -y --no-progress
+        }
+        if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+        "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    - name: Compile FrameworkGUI-Setup.exe
+      shell: pwsh
+      run: |
+        & "$env:ISCC" "/DAppVersion=${{ inputs.version }}" windows\installer.iss
+        if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+        if (-not (Test-Path windows\dist\FrameworkGUI-Setup.exe)) {
+          throw "windows\dist\FrameworkGUI-Setup.exe was not produced"
+        }
+        Get-Item windows\dist\FrameworkGUI-Setup.exe | Format-List Name, Length

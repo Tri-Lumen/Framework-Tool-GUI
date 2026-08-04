@@ -72,11 +72,15 @@ modules:
         /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.svg
         /app/share/icons/hicolor/scalable/apps/io.github.frameworkgui.FrameworkGUI.svg
+      - install -Dm644 LICENSE
+        /app/share/licenses/io.github.frameworkgui.FrameworkGUI/LICENSE
     sources:
       - type: file
         path: ../framework_gui.py
       - type: file
         path: ../parsers.py
+      - type: file
+        path: ../LICENSE
       - type: file
         path: framework-gui
       - type: file
