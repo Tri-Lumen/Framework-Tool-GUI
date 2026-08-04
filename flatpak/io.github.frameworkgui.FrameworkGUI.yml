@@ -8,6 +8,10 @@ finish-args:
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland
+  # No --share=network on purpose. The Drivers tab only opens links (the
+  # portal handles that, no network permission needed), and the one code
+  # path that downloads anything — fetching a helper's GitHub release — is
+  # Windows-only. Adding it back would widen the sandbox for nothing.
   # REQUIRED: lets the app run framework_tool (and pkexec) on the HOST via
   # flatpak-spawn. EC/firmware access is impossible from inside the sandbox,
   # so this permission is the whole point of the app. It is a deliberate
@@ -64,19 +68,32 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm644 framework_gui.py /app/share/framework-gui/framework_gui.py
-      # framework_gui.py imports parsers.py from its own directory - shipping
-      # one without the other gives an app that dies on launch.
+      # framework_gui.py imports these from its own directory - shipping it
+      # without any one of them gives an app that dies on launch.
       - install -Dm644 parsers.py /app/share/framework-gui/parsers.py
+      - install -Dm644 power.py /app/share/framework-gui/power.py
+      - install -Dm644 deps.py /app/share/framework-gui/deps.py
+      - install -Dm644 drivers.py /app/share/framework-gui/drivers.py
       - install -Dm755 framework-gui /app/bin/framework-gui
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.desktop
         /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.svg
         /app/share/icons/hicolor/scalable/apps/io.github.frameworkgui.FrameworkGUI.svg
+      - install -Dm644 LICENSE
+        /app/share/licenses/io.github.frameworkgui.FrameworkGUI/LICENSE
     sources:
       - type: file
         path: ../framework_gui.py
       - type: file
         path: ../parsers.py
+      - type: file
+        path: ../power.py
+      - type: file
+        path: ../deps.py
+      - type: file
+        path: ../drivers.py
+      - type: file
+        path: ../LICENSE
       - type: file
         path: framework-gui
       - type: file

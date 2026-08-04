@@ -38,7 +38,7 @@ jobs:
       - run: ruff check .
 
   windows-build:
-    name: Windows exe build
+    name: Windows exe + installer build
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,22 +51,15 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover tests -v
 
-      # Runs the real windows/build.bat, not a reimplementation of it, so a
-      # broken build script fails CI instead of failing a user.
-      - name: Build FrameworkGUI.exe
-        env:
-          FWGUI_NO_PAUSE: "1"
-        run: cmd /c windows\build.bat
-
-      - name: Check the exe was produced
-        run: |
-          if (-not (Test-Path windows\dist\FrameworkGUI.exe)) {
-            throw "windows\dist\FrameworkGUI.exe was not produced"
-          }
-          Get-Item windows\dist\FrameworkGUI.exe | Format-List Name, Length
+      # Same composite action the release workflow uses, so what ships on a
+      # release is what CI exercised on every push - including compiling
+      # installer.iss, which otherwise only gets validated at release time.
+      - uses: ./.github/actions/build-windows
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FrameworkGUI-exe
-          path: windows/dist/FrameworkGUI.exe
+          name: FrameworkGUI-windows
+          path: |
+            windows/dist/FrameworkGUI.exe
+            windows/dist/FrameworkGUI-Setup.exe
           if-no-files-found: error

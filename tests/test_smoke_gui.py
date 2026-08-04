@@ -84,7 +84,12 @@ def _drive_app(timeout_ms):
 
     def snapshot():
         results["caps"] = dict(app.caps)
+        results["cpu"] = dict(app.cpu)
+        results["driver_entry"] = dict(app._driver_entry)
+        results["driver_all"] = list(app._driver_all)
+        results["power_backend"] = app.power_backend
         results["detected_var"] = app.detected_var.get()
+        results["tabs"] = [app.nb.tab(t, "text") for t in app.nb.tabs()]
         for tab_id in app.nb.tabs():
             name = app.nb.tab(tab_id, "text")
             frame = app.nb.nametowidget(tab_id)
@@ -202,6 +207,52 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertEqual(len(r["Tools"]), 7)
         self.assertNotIn("Power / battery", r["Info"])
         self.assertNotIn("Expansion bay (L16)", r["Ports & Modules"])
+
+    def test_helper_tool_tabs_are_always_present(self):
+        # Power/Setup/Drivers drive tools other than framework_tool, so they
+        # are not gated on the board model the way the other tabs are.
+        r = run_app_and_capture(VERSIONS_L16)
+        for tab in ("Power (TDP)", "Setup", "Drivers"):
+            self.assertIn(tab, r["tabs"])
+        self.assertIn("Open downloads list", r["Drivers"])
+        self.assertIn("Re-check what is installed", r["Setup"])
+
+    def test_drivers_tab_offers_every_build_not_just_the_detected_one(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        # The detected build is the top button; the rest are in the dropdown.
+        self.assertIn(r["driver_entry"]["label"], r["Drivers"])
+        self.assertEqual(len(r["driver_all"]), len(fg.drivers.CATALOG) + 1)
+
+    def test_drivers_tab_matches_the_detected_board(self):
+        r = run_app_and_capture(VERSIONS_L16)
+        entry = r["driver_entry"]
+        self.assertTrue(entry["exact"])
+        self.assertIn("laptop-16", entry["url"])
+        self.assertIn("7040", entry["url"])
+
+    def test_drivers_tab_falls_back_when_the_board_is_unknown(self):
+        with tempfile.TemporaryDirectory() as empty_dir:
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = empty_dir
+            try:
+                r = _drive_app(DETECT_TIMEOUT_MS)
+            finally:
+                os.environ["PATH"] = old_path
+        # No framework_tool, so no board string — the tab still offers the
+        # index of every download rather than showing nothing.
+        self.assertFalse(r["driver_entry"]["exact"])
+        self.assertIn("Open downloads list", r["Drivers"])
+
+    def test_power_tab_reports_a_backend_or_explains_itself(self):
+        r = run_app_and_capture(VERSIONS_DESKTOP)
+        backend = r["power_backend"]
+        if backend is None:
+            # No usable backend on this test machine: the tab must offer the
+            # way forward instead of a dead end.
+            self.assertIn("Open the Setup tab", r["Power (TDP)"])
+        else:
+            self.assertIn(backend, fg.power.BACKENDS)
+            self.assertIn("Apply limits", r["Power (TDP)"])
 
     def test_binary_missing_fails_open(self):
         # Point PATH somewhere with no framework_tool at all.

@@ -11,12 +11,19 @@ works.
 A Tkinter GUI for [framework_tool](https://github.com/FrameworkComputer/framework-system),
 the official CLI for controlling Framework laptop/desktop firmware (fans,
 battery charge limits, keyboard backlight, USB-C PD ports, etc). The GUI
-shells out to the CLI and parses its text output — it has no other way to
-talk to the hardware.
+shells out to the CLI and parses its text output — it has no direct hardware
+access of any kind.
+
+It has since grown past framework_tool, by explicit request, into three more
+tabs: **Power (TDP)** (RyzenAdj, Linux powercap, Windows powercfg), **Setup**
+(installing those helpers), and **Drivers** (links to Framework's downloads
+list per device build, plus vendor drivers for swapped-in parts). Same shape as the rest of the app — run a program, parse its output
+best-effort — and the same rule: the app never touches hardware itself.
 
 Two distribution targets only, by explicit request: a Windows exe/installer
 and a Linux Flatpak. (An earlier Linux "script installer" was built and then
-deliberately dropped — don't re-add it unless asked.)
+deliberately dropped — don't re-add it unless asked.) Releases are published
+by GitHub Actions; see "Releasing" below.
 
 Hard requirement carried through the whole project: **no background
 processes.** No services, timers, tray icons, or autostart entries on either
@@ -29,17 +36,34 @@ when that command finishes.
 framework_gui.py      Tk app — UI, command execution, the 14 "Tools" workflows
 parsers.py             Pure-Python: regex parsers + detect_model(). No tkinter
                         import, so it's unit-testable without a display.
+power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
+                        powercfg. Builds commands, does no I/O of its own.
+deps.py                Helper-tool registry: detect, and build install plans.
+drivers.py             Framework download-page catalog. Links only, no I/O.
+                        (all three follow parsers.py's rules: stdlib only, no
+                        tkinter, I/O injected as arguments)
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
+tests/test_power.py    Unit tests for power.py — unit conversions especially.
+tests/test_deps.py     Unit tests for deps.py — every install plan path.
+tests/test_drivers.py  Unit tests for drivers.py — board matching + catalog.
 tests/test_smoke_gui.py Full-app tests: real App(), real mainloop(), stub CLI
                         binary on PATH, assert on which buttons survive gating.
                         Needs a display (xvfb-run on headless Linux); skips
                         itself on Windows (the stub binary is POSIX-only).
 tests/test_packaging.py Asserts every app module is carried by every packaging
-                        path. No display, no build tooling needed.
+                        path, that every install path leaves an uninstaller and
+                        a Start Menu entry, and that the release workflow
+                        produces exactly the assets the README links. No
+                        display, no build tooling needed.
 windows/               build.bat (PyInstaller), installer.iss (Inno Setup),
                         install.ps1 / install-exe.ps1 (+ .cmd wrappers), uninstall
 flatpak/               manifest, .desktop, launcher script, icon, its own README
-.github/workflows/ci.yml  Linux tests (Xvfb), ruff lint, real Windows exe build
+.github/workflows/ci.yml       Linux tests (Xvfb), ruff lint, Windows build
+.github/workflows/release.yml  Fires on release published: Windows exe +
+                        installer, Flatpak bundle, uploaded to the release
+.github/actions/build-windows  Composite action shared by both workflows so
+                        the released artifact is the one CI exercised
+LICENSE                MIT
 README.md              User-facing install/usage instructions
 ```
 
@@ -95,6 +119,43 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   already root) and/or `flatpak-spawn --host` (when running inside the
   Flatpak sandbox — the sandbox can't reach the EC at all, so this is a
   deliberate, unavoidable sandbox hole; see `flatpak/README.md`).
+
+- **Two command paths, on purpose.** `_build_cmd`/`_exec` are
+  framework_tool-only: they put the binary from the top bar in front of the
+  args. Everything on the Power/Setup/Drivers tabs runs a *different*
+  program, so it goes through `_build_external`/`_exec_external`, which
+  applies the same pkexec and flatpak-spawn wrapping with no binary
+  prefixed. Don't route helper tools through `run()` — you'd get
+  `framework_tool ryzenadj --stapm-limit=…`.
+
+- **Everything beyond framework_tool is "shell out to someone else".** The
+  app has no direct hardware access anywhere, so the three newer tabs are
+  the same shape as the old ones: build a command in a pure module, run it
+  in a worker thread, parse best-effort, fall back to raw output.
+  - `power.py` picks a backend from (CPU vendor, OS, what's installed) and
+    builds the command. **Watch the units**: RyzenAdj takes milliwatts and
+    RAPL takes microwatts; the UI is in watts and `check_watts()` is the
+    single conversion gate. `powercfg` is deliberately in the table even
+    though it caps *frequency* rather than wattage — it needs nothing
+    installed, so it's the honest fallback, and `sets_watts: False` is what
+    stops the UI from labelling it as watts.
+  - `deps.py` never returns "nothing I can do". Every dependency yields an
+    install plan; where no package exists (RyzenAdj outside the AUR) the
+    plan degrades to `KIND_MANUAL` with upstream's page. Emitting an
+    `apt-get install ryzenadj` that cannot work would be worse than saying
+    so. Nothing installs without a confirm dialog showing the exact command.
+  - `drivers.py` matches the board string from `--versions` against a
+    catalog ordered **most specific first** ("Laptop 13 Pro" must precede
+    the entry that matches any "Ryzen AI 300"). Unmatched boards fall back
+    to the Knowledge Base index, never to nothing. Framework's URLs live
+    only in `CATALOG`/`EXTRA`, so fixing a dead link is a one-line change.
+    It **links and does not fetch**, by request and because it works better:
+    Framework keeps one downloads list per device build that is always
+    current, and the Knowledge Base 403s scripted fetches anyway. An earlier
+    version scraped the bundle link out of the page; `test_drivers.py` has a
+    guard that fails if any networking creeps back into the module. The
+    app's only network access now lives in `deps.py` (fetching a helper's
+    GitHub release), which is why the Flatpak needs no `--share=network`.
 
 - **Blocked commands** (`App.BLOCKED` in `framework_gui.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
@@ -181,6 +242,21 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
    main thread with no mainloop running. Keep that teardown. (This is
    test-harness-only: real users get one App per process.)
 
+8. **Re-packing a widget moves it to the end of the pack order.**
+   `_build_tabs()` destroys and rebuilds the notebook on every rescan. When
+   it packed the new notebook straight into the window, the tabs landed
+   *below* the output pane and the status bar the moment the first device
+   scan finished — the app looked fine until detection returned, which is
+   why it survived so long. The notebook now lives in a `tabs_holder` frame
+   packed exactly once in `__init__`. Anything else rebuilt at runtime needs
+   the same treatment.
+
+9. **Screenshots of a Tk app under Xvfb lie if you only call
+   `update_idletasks()`.** Half the widgets come out blank — the geometry is
+   right, the paint hasn't happened. `update()` plus a short `after()` delay
+   before grabbing gives a true picture. Worth knowing before "fixing" a
+   layout bug that isn't there.
+
 ## Not yet verified (be skeptical, not confident)
 
 - **Never run against real `framework_tool` or real hardware.** All
@@ -194,54 +270,104 @@ xvfb-run -a python3 -m unittest discover tests -v   # everything, headless Linux
   a real Framework device, that's the highest-value next step: run each
   Info/Tools button and diff actual output against the samples in
   `tests/test_parsers.py`.
-- **`windows/build.bat` now runs for real in CI** (the `windows-build` job
-  invokes the script itself, not a reimplementation, and uploads the
-  resulting `FrameworkGUI.exe` as an artifact) — so a green badge means the
-  exe *builds*. It does not mean anyone has *launched* that exe on a real
+- **`windows/build.bat` now runs for real in CI** (via the
+  `.github/actions/build-windows` composite action, which invokes the script
+  itself rather than a reimplementation, and CI uploads the resulting
+  `FrameworkGUI.exe` + `FrameworkGUI-Setup.exe`) — so a green badge means
+  both *build*. It does not mean anyone has *launched* them on a real
   Windows desktop: the `--uac-admin` self-elevation, the Start Menu
-  shortcut scripts (`install.ps1` / `install-exe.ps1`), and the whole
+  shortcut/uninstaller scripts (`install.ps1` / `install-exe.ps1` /
+  `uninstall.ps1`), the Apps & features registration and the whole
   Mark-of-the-Web/SMB story are still unexercised.
-- **`windows/installer.iss` has never been compiled.** No Inno Setup in CI;
-  a syntax error there would only show up on first real use.
-- **`flatpak/io.github.frameworkgui.FrameworkGUI.yml` has never actually
-  been built with `flatpak-builder`.** The tcl/tk/cpython source URLs and
-  sha256 hashes *were* verified by actually downloading those exact
-  archives and hashing them during development, so the build inputs are
-  correct — but the manifest's build steps, `finish-args`, and the
-  `flatpak-spawn --host` runtime behavior have not been exercised. CI only
-  checks the manifest's *structure* (`tests/test_packaging.py`: every
-  referenced path exists, every app module is installed); a real
-  flatpak-builder run compiles Tcl/Tk and CPython from source and was
-  judged too slow to put on every push. Add it as a
-  `workflow_dispatch`/nightly job if you want it.
+- **`windows/installer.iss` now compiles in CI** (same composite action
+  installs Inno Setup if the runner image lacks it), so syntax errors show
+  up on push. Nobody has *run* the resulting `FrameworkGUI-Setup.exe`: the
+  install/uninstall round trip, the Start Menu group and the `AppId`-based
+  upgrade path are unverified.
+- **`flatpak/io.github.frameworkgui.FrameworkGUI.yml` is now built by
+  `.github/workflows/release.yml`** (release-published and
+  `workflow_dispatch`, not on every push — it compiles Tcl/Tk and CPython
+  from source). It had never been built when that job was written, so the
+  first run may well fail; rehearse it with `workflow_dispatch` before
+  relying on a release. `tests/test_packaging.py` still only checks the
+  manifest's *structure*, and the `flatpak-spawn --host` runtime behavior
+  remains unexercised regardless of whether the build goes green.
+- **The release workflow itself has never fired.** The
+  `gh release upload` steps, the tag→version derivation and the
+  `/releases/latest/download/...` links in the README all go live the first
+  time a release is published. A `workflow_dispatch` run exercises
+  everything except the upload.
+- **No power-limit backend has ever run.** `power.py`'s command builders are
+  unit-tested, but no `ryzenadj`, no RAPL write and no `powercfg` call has
+  been executed against real silicon from this app. The RyzenAdj `-i` parser
+  was written against upstream's README sample, exactly the same
+  "matched the docs, not your version" caveat as the framework_tool parsers.
+  Sanity-check on real hardware by applying a limit and reading it back —
+  the Power tab does that read-back automatically after Apply.
+- **The Framework Knowledge Base URLs in `drivers.py` were collected from
+  search results, not by loading each page.** They are the right shape and
+  the right articles, but a moved article shows up as a 404 in someone's
+  browser. Now that the tab is links-only these URLs *are* the feature, so
+  confirming all twelve in a real browser matters more than it used to.
+- **The persistence links on the Power tab have not been opened either.**
+  Same caveat, smaller blast radius: a dead one costs a user a search.
 - The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
   crude placeholder, not real artwork.
-- No LICENSE file yet — the repo is "all rights reserved" by default until
-  one is added. Pick one before making this public.
 
 ## Deliberately out of scope
 
-- **TDP/power-limit control.** Discussed explicitly and declined:
-  `framework_tool` talks to the EC, and TDP (PL1/PL2 on Intel, STAPM/PPT on
-  AMD) is controlled by the SoC, which the EC doesn't own. Nothing in the
-  upstream CLI touches it. Would require shelling out to a *second* tool
-  (`ryzenadj` on AMD, RAPL/ThrottleStop on Intel) and has its own
-  complications (AMD-only via ryzenadj, values reset on reboot unless you
-  add a persistence mechanism, which itself would need a background
-  service/scheduled task — in tension with the no-background-processes
-  requirement). If this comes back, treat it as a separate feature
-  decision, not an oversight to quietly fix.
+- **Persisting power limits across reboots.** The limits the Power tab sets
+  are volatile — that is a property of the SoC registers, not a bug. Making
+  them stick needs something to re-apply them at boot and after resume: a
+  systemd unit, a scheduled task, a tray agent. All of those are background
+  processes, which is the one requirement this project has never bent. The
+  UI states the limitation instead. If this comes back, it is a decision to
+  drop the no-background-processes rule, not a small feature.
+- **Driving ThrottleStop.** It has no command line. The Setup tab can point
+  at it and the Drivers tab can link it, but nothing here can script it. On
+  Intel, `powercfg` (Windows) and RAPL (Linux) are what the app can actually
+  drive.
+- **Running downloaded installers.** The Drivers tab downloads a bundle and
+  stops there. Executing a vendor installer unattended, as an elevated
+  process, is not something this app should do on a user's behalf.
+
+## Releasing
+
+Publishing a GitHub Release (tag `vX.Y.Z`) triggers
+`.github/workflows/release.yml`, which builds and attaches three assets:
+
+| Asset | Built by |
+|---|---|
+| `FrameworkGUI-Setup.exe` | `windows/installer.iss` via Inno Setup |
+| `FrameworkGUI.exe` | `windows/build.bat` via PyInstaller |
+| `FrameworkGUI.flatpak` | `flatpak/…FrameworkGUI.yml` via flatpak-builder |
+
+**Those three filenames are a contract**: README links
+`/releases/latest/download/<name>` for each, and
+`tests/test_packaging.py` fails if the workflow and the README disagree.
+Rename an asset in one place and you must rename it in both.
+
+The version comes from the tag with any leading `v` stripped, and is passed
+to Inno as `/DAppVersion=`. Manual `workflow_dispatch` runs build everything
+under version `0.0.0-dev` and skip only the upload — use that to rehearse,
+especially the Flatpak job, which had never been run when it was written.
 
 ## Suggested next steps, roughly in priority order
 
 1. Get access to a real Framework device (any model) and validate the
    parsers/detection against real `--versions`/`--power`/`--thermal`/
    `--pdports` output. This is the single highest-value thing to do next.
-2. Install the CI-built exe on a real Windows machine (Start Menu shortcut,
-   UAC self-elevation, running it from an SMB share) — CI proves it builds,
-   nothing yet proves it runs.
-3. Actually run `flatpak-builder` against the manifest and fix whatever
-   breaks, then consider a `workflow_dispatch` CI job for it.
-4. Compile `windows/installer.iss` with Inno Setup once.
-5. Real app icon for the Flatpak `.desktop`/icon file.
-6. Decide on a LICENSE.
+2. Rehearse `.github/workflows/release.yml` with `workflow_dispatch` and fix
+   whatever the Flatpak job turns up — it is the one build step that had
+   never executed anywhere before it was added.
+3. Run `FrameworkGUI-Setup.exe` on a real Windows machine: install,
+   Start Menu group, uninstall, reinstall over the top. CI proves it
+   compiles, nothing yet proves it installs.
+4. Same for the script installers (`install-exe.cmd`) from an SMB share,
+   including the uninstaller they now drop in `%LOCALAPPDATA%\FrameworkGUI`.
+5. Apply a power limit on a real AMD Framework with RyzenAdj installed and
+   confirm the read-back matches — then do the same for RAPL on Intel Linux
+   and `powercfg` on Windows.
+6. Open all twelve Knowledge Base URLs in `drivers.py` in a browser and
+   confirm each still resolves — they are the whole Drivers tab now.
+7. Real app icon for the Flatpak `.desktop`/icon file.

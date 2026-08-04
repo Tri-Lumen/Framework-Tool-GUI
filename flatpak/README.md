@@ -3,6 +3,13 @@
 Build once on any Linux machine, produce a `.flatpak` bundle, install that
 single file everywhere else with one command.
 
+## You probably don't need to build this yourself
+
+Every published GitHub Release carries a prebuilt bundle
+([`FrameworkGUI.flatpak`](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI.flatpak),
+built by `.github/workflows/release.yml`). Download it and skip to
+"Install on any device". The rest of this file is for building from source.
+
 ## IMPORTANT: do not build on an SMB/CIFS mount
 
 flatpak-builder uses OSTree, which requires hardlinks and extended
@@ -40,6 +47,14 @@ flatpak install --user /path/to/share/FrameworkGUI.flatpak
 
 Launch "Framework System GUI" from the app menu.
 
+## Uninstall
+
+Flatpak is the uninstaller here - there is no separate script:
+
+```bash
+flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
+```
+
 ## Notes
 
 - `framework_tool` must be installed **on the host** of each device
@@ -48,6 +63,14 @@ Launch "Framework System GUI" from the app menu.
   `flatpak-spawn --host` - that is what the
   `--talk-name=org.freedesktop.Flatpak` permission in the manifest is for.
   This is an intentional sandbox escape; without it the app is useless.
+- There is deliberately no `--share=network`. The Drivers tab only opens
+  links, which goes through the portal, and the only code path that
+  downloads anything (fetching a helper tool's GitHub release) is
+  Windows-only. Nothing in the Flatpak build needs network access.
+- The Setup tab's installs run on the *host* (same `flatpak-spawn --host`
+  path as every other command, plus pkexec), so a helper installed from here
+  lands in the host's package manager, not in the sandbox. That is what you
+  want: the sandbox cannot reach the EC or the SoC either way.
 - Elevation uses the host's pkexec, so expect a polkit password prompt per
   command unless you install a polkit policy with `auth_admin_keep` for the
   framework_tool path on the host.
