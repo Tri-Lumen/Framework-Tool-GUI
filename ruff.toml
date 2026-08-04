@@ -1,0 +1,21 @@
+# Explicit rule set, on purpose.
+#
+# Relying on ruff's defaults makes CI non-reproducible: a new ruff release
+# that promotes rules into the default set turns the build red without a
+# single line of code changing. Pick the rules here, pin the version in
+# .github/workflows/ci.yml, and bump both deliberately.
+#
+#   E, W  pycodestyle errors and warnings
+#   F     pyflakes (undefined names, unused imports, ...)
+#   I     import sorting
+#
+# Note for anyone widening this: framework_gui.py deliberately catches bare
+# `Exception` in a few places (a GUI must not die because one shelled-out
+# command misbehaved) and carries `# noqa: BLE001` markers for it, so if you
+# enable BLE001 those are already annotated.
+
+line-length = 100
+target-version = "py38"
+
+[lint]
+select = ["E", "W", "F", "I"]

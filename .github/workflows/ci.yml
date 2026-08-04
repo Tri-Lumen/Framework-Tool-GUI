@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # System Python + python3-tk rather than actions/setup-python: the GUI
+      # smoke tests need a real tkinter, and Xvfb gives them a display.
+      - name: Install tkinter and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb
+
+      - name: Run test suite
+        run: xvfb-run -a python3 -m unittest discover tests -v
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned deliberately: an unpinned ruff turns CI red whenever a new
+      # release promotes rules into its default set. The rule set itself
+      # lives in ruff.toml. Bump both together, on purpose.
+      - run: pip install ruff==0.15.8
+      - run: ruff check .
+
+  windows-build:
+    name: Windows exe build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The GUI smoke tests skip themselves here (their stub binary is
+      # POSIX-only); the parser and packaging tests do run.
+      - name: Run test suite
+        run: python -m unittest discover tests -v
+
+      # Runs the real windows/build.bat, not a reimplementation of it, so a
+      # broken build script fails CI instead of failing a user.
+      - name: Build FrameworkGUI.exe
+        env:
+          FWGUI_NO_PAUSE: "1"
+        run: cmd /c windows\build.bat
+
+      - name: Check the exe was produced
+        run: |
+          if (-not (Test-Path windows\dist\FrameworkGUI.exe)) {
+            throw "windows\dist\FrameworkGUI.exe was not produced"
+          }
+          Get-Item windows\dist\FrameworkGUI.exe | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameworkGUI-exe
+          path: windows/dist/FrameworkGUI.exe
+          if-no-files-found: error

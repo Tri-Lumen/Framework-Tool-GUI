@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /app/bin/python3 /app/share/framework-gui/framework_gui.py "$@"

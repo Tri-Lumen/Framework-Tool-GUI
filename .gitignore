@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Windows build output
+windows/dist/
+windows/build/
+windows/*.exe
+
+# Flatpak build output
+flatpak/build/
+flatpak/repo/
+flatpak/.flatpak-builder/
+flatpak/*.flatpak
+
+# Reports the app writes to the user's home dir at runtime (never in-repo,
+# listed defensively in case a test run drops one here)
+framework_report_*.txt
+
+# OS cruft
+.DS_Store
+Thumbs.db
