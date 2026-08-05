@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import power  # noqa: E402
+from frameworkgui import power  # noqa: E402
 
 CPUINFO_AMD = """\
 processor\t: 0
@@ -85,6 +85,72 @@ class TestVendorDetection(unittest.TestCase):
 
     def test_cpu_label_falls_back_to_windows_string(self):
         self.assertEqual(power.cpu_label("", WIN_INTEL), WIN_INTEL)
+
+    def test_a_brand_string_beats_both(self):
+        # Windows has no /proc/cpuinfo and %PROCESSOR_IDENTIFIER% is a
+        # CPUID dump; the registry's ProcessorNameString is the real name.
+        self.assertEqual(
+            power.cpu_label("", WIN_AMD, "AMD Ryzen 7 7840U w/ Radeon 780M "
+                                         "Graphics"),
+            "AMD Ryzen 7 7840U w/ Radeon 780M Graphics")
+
+    def test_an_empty_brand_string_is_not_a_name(self):
+        self.assertEqual(power.cpu_label("", WIN_INTEL, "   "), WIN_INTEL)
+
+
+class TestShortCpuLabel(unittest.TestCase):
+    """The Overview heading has one line, and these strings do not fit it.
+
+    On a real Laptop 13 the sub-line read "Laptop 13 (AMD Ryzen 7040Series)
+    · AMD64 Family 25 Model 116 Stepping 1, AuthenticAMD · EC azalea_v3.4…"
+    and wrapped onto three lines, most of it saying nothing.
+    """
+
+    def test_amd_marketing_string(self):
+        self.assertEqual(
+            power.short_cpu_label("AMD Ryzen 7 7840U w/ Radeon 780M Graphics"),
+            "Ryzen 7 7840U")
+
+    def test_amd_with_the_other_spelling(self):
+        self.assertEqual(
+            power.short_cpu_label("AMD Ryzen 5 7640U with Radeon Graphics"),
+            "Ryzen 5 7640U")
+
+    def test_intel_marketing_string(self):
+        self.assertEqual(
+            power.short_cpu_label("Intel(R) Core(TM) i7-1260P CPU @ 2.10GHz"),
+            "Core i7-1260P")
+
+    def test_intel_generation_prefix_is_kept(self):
+        self.assertEqual(
+            power.short_cpu_label("13th Gen Intel(R) Core(TM) i5-1340P"),
+            "13th Gen Core i5-1340P")
+
+    def test_a_desktop_part(self):
+        self.assertEqual(
+            power.short_cpu_label("AMD Ryzen 9 7950X 16-Core Processor"),
+            "Ryzen 9 7950X")
+
+    def test_a_cpuid_dump_is_not_a_name(self):
+        # The whole reason this exists: it names a family, not a chip, so
+        # there is nothing in it worth the width.
+        self.assertEqual(power.short_cpu_label(WIN_AMD), "")
+        self.assertEqual(power.short_cpu_label(WIN_INTEL), "")
+        self.assertEqual(
+            power.short_cpu_label("ARM64 Family 8 Model 1 Stepping 0"), "")
+
+    def test_nothing_to_shorten(self):
+        for value in ("", None, "   "):
+            self.assertEqual(power.short_cpu_label(value), "")
+
+    def test_an_unrecognised_name_is_passed_through(self):
+        # This trims known noise; it does not invent names.
+        self.assertEqual(power.short_cpu_label("Snapdragon X Elite"),
+                         "Snapdragon X Elite")
+
+    def test_whitespace_is_normalised(self):
+        self.assertEqual(power.short_cpu_label("  AMD   Ryzen 7  7840U  "),
+                         "Ryzen 7 7840U")
 
 
 class TestBackendSelection(unittest.TestCase):

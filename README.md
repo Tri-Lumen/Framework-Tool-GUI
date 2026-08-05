@@ -2,29 +2,20 @@
 
 [![CI](https://github.com/Tri-Lumen/Framework-Tool-GUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Tri-Lumen/Framework-Tool-GUI/actions/workflows/ci.yml)
 
-A graphical user interface to be used in conjunction with the `framework_tool`
-Rust libraries — a PySide6/Qt front-end for
-[framework_tool](https://github.com/FrameworkComputer/framework-system),
-packaged for Windows and Linux (Flatpak).
+A desktop front-end for
+[framework_tool](https://github.com/FrameworkComputer/framework-system), the
+official CLI for Framework laptop and desktop firmware — fans, battery charge
+limits, keyboard backlight, USB-C PD ports, diagnostics — plus CPU power
+limits, driver downloads, and a setup section for the helper tools those
+need. Windows and Linux.
 
-The window is an icon rail (five groups) selecting a pane list (the sections
-inside that group), a content column, and a resizable output drawer that
-shows every command the app runs and what it printed, verbatim. It is dark
-only, with a translucent "acrylic" appearance where the platform can
-composite one and a flat opaque appearance everywhere else — the app probes
-at startup, forces opaque when it cannot, and says which one you have got in
-the status bar rather than leaving a translucent window over nothing.
-
-`framework_tool` itself must be installed on each target machine
+`framework_tool` itself must be installed on the machine
 (Windows: `winget install framework_tool --source winget`; Linux: your
-distro's `framework-system` package). The GUI shells out to that CLI — it has
-no other way to talk to the hardware.
+distro's `framework-system` package). This app shells out to that CLI and
+shows you every command it runs and what came back — it has no other way to
+talk to the hardware, and it never touches it directly.
 
 ## Download
-
-Prebuilt Windows and Linux packages are attached to every
-[release](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases). These
-links always resolve to the newest one:
 
 | Platform | Download | What you get |
 | --- | --- | --- |
@@ -32,57 +23,91 @@ links always resolve to the newest one:
 | **Windows** (portable) | [FrameworkGUI.exe](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI.exe) | Single self-contained exe, nothing installed |
 | **Linux** | [FrameworkGUI.flatpak](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI.flatpak) | Flatpak bundle — `flatpak install --user FrameworkGUI.flatpak` |
 
-Windows SmartScreen will warn about the unsigned installer ("More info" →
-"Run anyway"); there is no code-signing certificate for this project.
+These links always resolve to the newest
+[release](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases).
 
-Both builds are produced by
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
-when a release is published and attaches the artifacts to it.
+**Windows.** Run the installer. It adds a *Framework System GUI* Start Menu
+group containing the app and an Uninstall entry, and registers in Settings →
+Apps. The app self-elevates — one UAC prompt per launch, no console window.
+SmartScreen will warn about the unsigned installer ("More info" → "Run
+anyway"); there is no code-signing certificate for this project.
 
-## Documentation
+**Linux.**
 
-The [wiki](https://github.com/Tri-Lumen/Framework-Tool-GUI/wiki) covers
-installation, each section of the app, per-device support, and
-troubleshooting. Its pages are kept in [`wiki/`](wiki/) in this repository so
-they are reviewed alongside the code they describe.
+```bash
+flatpak install --user FrameworkGUI.flatpak
+flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
+```
 
-- [Installation](wiki/Installation.md) — including installing `framework_tool` itself
-- [Using the app](wiki/Using-the-app.md) — the nine sections, one at a time
-- [Device support](wiki/Device-support.md) — which controls each board gets, and why
-- [Troubleshooting](wiki/Troubleshooting.md) — blank readings, "not read" bays, permission prompts
-- [Architecture](wiki/Architecture.md) and [Development](wiki/Development.md) — for anyone changing it
+The sandbox cannot reach the embedded controller, so the app runs the host's
+`framework_tool` through `flatpak-spawn --host`. Install `framework_tool` on
+the host, not in the sandbox.
+
+Full instructions, including running from source, are in
+[Installation](wiki/Installation.md).
+
+## What it does
+
+**Firmware, through framework_tool.** Fan duty and RPM with automatic control
+one click away; charge limits and the rest of the EC settings, each read back
+with the reader that suits it; USB-C port state; twelve diagnostic workflows
+that run a sequence of commands and restore whatever they changed, including
+on cancel. Only the controls your board actually supports are shown — and if
+detection fails, everything is shown rather than guessing.
+
+**CPU power limits**, which the EC does not own. The app picks a backend from
+your CPU and OS:
+
+| Backend | CPU | OS | Sets |
+| --- | --- | --- | --- |
+| [RyzenAdj](https://github.com/FlyGoat/RyzenAdj) | AMD | Windows, Linux | STAPM / PPT fast / PPT slow — real watts |
+| Linux powercap (RAPL) | Intel, some AMD | Linux | Kernel long/short power limits — real watts |
+| `powercfg` | any | Windows | Max processor state % — a frequency cap, not a wattage |
+
+RyzenAdj and RAPL limits are **volatile**: a reboot clears them, and sleep or
+an AC/battery transition often does too. Making them stick needs something
+running in the background, which this app deliberately does not have — so the
+pane links the documentation for setting that up yourself with the tool it
+actually used. `powercfg` is the exception; Windows saves it with the power
+scheme.
+
+**Setup** detects the helper tools and installs them, always showing the exact
+command first and waiting for you to confirm. **Drivers** opens Framework's
+downloads page for your exact device build, plus vendor pages for parts the
+bundle does not cover.
+
+**No background processes.** No services, timers, tray icons or autostart
+entries. A process is spawned when you press a button and exits when the
+command finishes. That is also why power limits do not survive a reboot.
 
 ## Screenshots
 
-Every capture below is the app driven against a **simulated** `framework_tool`
-— no Framework hardware was involved, and the device details (board, CPU,
-firmware) are stand-ins, not a real machine's. See
-[Not yet verified](CLAUDE.md#not-yet-verified-be-skeptical-not-confident)
-for what that does and does not prove.
+Every capture is the app driven against a **simulated** `framework_tool` — no
+Framework hardware was involved, and the device details are stand-ins.
 
 | Overview | Diagnostics |
 | --- | --- |
-| [![Overview](docs/screenshots/overview.png)](docs/screenshots/overview.png) | [![Diagnostics](docs/screenshots/tools.png)](docs/screenshots/tools.png) |
+| [![Overview](wiki/screenshots/overview.png)](wiki/screenshots/overview.png) | [![Diagnostics](wiki/screenshots/tools.png)](wiki/screenshots/tools.png) |
 | Detected board, live stat cards, and the expansion bays. | The twelve workflows, each with the timings you can override. |
 
 | Fans | Ports & modules |
 | --- | --- |
-| [![Fans](docs/screenshots/fans.png)](docs/screenshots/fans.png) | [![Ports](docs/screenshots/ports.png)](docs/screenshots/ports.png) |
-| Duty and RPM control, with automatic control one click away. | Per-port role and negotiated wattage, plus the card queries. |
+| [![Fans](wiki/screenshots/fans.png)](wiki/screenshots/fans.png) | [![Ports](wiki/screenshots/ports.png)](wiki/screenshots/ports.png) |
+| Duty and RPM control, with automatic control one click away. | Per-port role and power, plus the card queries. |
 
 | Settings | CPU limits |
 | --- | --- |
-| [![Settings](docs/screenshots/settings.png)](docs/screenshots/settings.png) | [![CPU limits](docs/screenshots/power.png)](docs/screenshots/power.png) |
+| [![Settings](wiki/screenshots/settings.png)](wiki/screenshots/settings.png) | [![CPU limits](wiki/screenshots/power.png)](wiki/screenshots/power.png) |
 | Charge presets sit above the rows they write; Auto where the CLI has one. | Real STAPM/PPT limits through RyzenAdj, with the volatility spelled out. |
 
 | Drivers | Setup |
 | --- | --- |
-| [![Drivers](docs/screenshots/drivers.png)](docs/screenshots/drivers.png) | [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) |
+| [![Drivers](wiki/screenshots/drivers.png)](wiki/screenshots/drivers.png) | [![Setup](wiki/screenshots/setup.png)](wiki/screenshots/setup.png) |
 | Framework's downloads page for this exact build, plus vendor drivers. | Detects the helper tools and shows the exact install command first. |
 
 | Console |
 | --- |
-| [![Console](docs/screenshots/console.png)](docs/screenshots/console.png) |
+| [![Console](wiki/screenshots/console.png)](wiki/screenshots/console.png) |
 | Free-form arguments, with the hardware-bricking flags refused. |
 
 ### The same app on different devices
@@ -94,217 +119,21 @@ battery-shaped and keeps only the RGB row.
 
 | Laptop 12 | Laptop 16 (Graphics Module) | Desktop |
 | --- | --- | --- |
-| [![Laptop 12](docs/screenshots/device-laptop-12.png)](docs/screenshots/device-laptop-12.png) | [![Laptop 16](docs/screenshots/device-laptop-16.png)](docs/screenshots/device-laptop-16.png) | [![Desktop](docs/screenshots/device-desktop.png)](docs/screenshots/device-desktop.png) |
+| [![Laptop 12](wiki/screenshots/device-laptop-12.png)](wiki/screenshots/device-laptop-12.png) | [![Laptop 16](wiki/screenshots/device-laptop-16.png)](wiki/screenshots/device-laptop-16.png) | [![Desktop](wiki/screenshots/device-desktop.png)](wiki/screenshots/device-desktop.png) |
 | 4 bays, stylus + touchscreen detected | 6 bays, longer chassis, bay reports the GPU | 2 front bays, no battery readings |
 
-The Desktop's Settings pane is the clearest illustration — eight rows on a
-laptop, one here, because that is all the mainboard supports:
+## Documentation
 
-[![Desktop settings](docs/screenshots/settings-desktop.png)](docs/screenshots/settings-desktop.png)
+The [wiki](https://github.com/Tri-Lumen/Framework-Tool-GUI/wiki) covers
+installation, each section of the app, per-device support, and
+troubleshooting. Its pages live in [`wiki/`](wiki/) in this repository so
+they are reviewed alongside the code they describe.
 
-## Repository layout
-
-```
-framework_gui.py   Qt app — layout, command execution, the 12 diagnostics
-widgets.py         Reusable UI pieces: cards, panels, bars, badges, the rail
-theme.py           Design tokens and the Qt style sheet built from them
-navigation.py      Rail/pane model and every capability-gated row
-appstate.py        The two UI choices that persist: appearance, drawer height
-backdrop.py        Can this platform composite a translucent window, and how
-device_images.py   Board string → product photograph, and the chassis
-                   dimensions the Overview's bay drawing is scaled from
-module_icons.py    Expansion-card marks, drawn as SVG paths rather than files
-app_icon.py        Where each packaging path finds the app icon
-parsers.py         Regex parsers + device detection
-power.py           CPU power-limit (TDP) backends: RyzenAdj, Linux powercap,
-                   Windows powercfg
-deps.py            Registry of helper tools and how to install each one
-drivers.py         Catalog of Framework's per-build download pages
-                   (only framework_gui.py and widgets.py import the toolkit,
-                   so everything else is unit-testable without a display)
-assets/devices/    Product photographs for the Overview, one per chassis
-assets/icons/      The app icon: a multi-resolution .ico plus PNGs
-tests/             Logic tests, GUI smoke tests, packaging checks
-windows/           PyInstaller build, Inno Setup script, install/uninstall
-flatpak/           Manifest, .desktop, launcher, icon, its own README
-.github/           CI, the release workflow, the shared Windows build action
-LICENSE            MIT
-CLAUDE.md          Architecture notes, gotchas, and what is still unverified
-```
-
-## Windows
-
-**Normal install:** download
-[FrameworkGUI-Setup.exe](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI-Setup.exe)
-and run it. It installs the app, adds a **Start Menu** group
-("Framework System GUI") containing the app *and* an **Uninstall** entry,
-and registers in Settings → Apps. The app self-elevates (one UAC prompt per
-launch), no console window.
-
-Everything below is for building or deploying it yourself.
-
-**Build it yourself** (any Windows machine with Python):
-Double-click `windows\build.bat`. It builds locally in `%TEMP%` (SMB-safe) and
-puts `FrameworkGUI.exe` in `windows\dist\`.
-Note: build.bat ONLY builds — it does not install anything anywhere.
-To get the installer too, compile `windows\installer.iss` with
-[Inno Setup](https://jrsoftware.org/isinfo.php) afterwards
-(`ISCC.exe /DAppVersion=1.2.3 windows\installer.iss`).
-
-CI does both on every push; you can download them from the
-**FrameworkGUI-windows** artifact of a green
-[CI run](https://github.com/Tri-Lumen/Framework-Tool-GUI/actions/workflows/ci.yml)
-instead of building them yourself.
-
-**Deploy from a share, without the installer:**
-double-click `windows\install-exe.cmd` — copies the exe to
-`%LOCALAPPDATA%\FrameworkGUI` along with a copy of the uninstaller, creates
-the same Start Menu group (app + Uninstall entry), and registers in
-Settings → Apps.
-
-**No-build alternative** (needs Python on every device):
-double-click `windows\install.cmd` — installs the Python script version
-with a run-as-admin Start Menu shortcut, uninstaller included the same way.
-It installs PySide6 into that Python if it is not already there; the
-packaged exe has the toolkit built in and needs none of this.
-
-**Uninstall:** Start Menu → Framework System GUI → *Uninstall Framework
-System GUI*, or Settings → Apps. Installs made by `FrameworkGUI-Setup.exe`
-use the installer's own uninstaller; installs made by the `.cmd` scripts use
-`%LOCALAPPDATA%\FrameworkGUI\uninstall.cmd`, which those scripts put there.
-
-All .cmd wrappers exist because PowerShell's execution policy blocks .ps1
-files launched directly from network shares; the wrappers bypass that.
-
-## Linux — Flatpak
-
-Download
-[FrameworkGUI.flatpak](https://github.com/Tri-Lumen/Framework-Tool-GUI/releases/latest/download/FrameworkGUI.flatpak)
-from the latest release, then:
-
-```bash
-flatpak install --user FrameworkGUI.flatpak     # install
-flatpak uninstall --user io.github.frameworkgui.FrameworkGUI   # uninstall
-```
-
-To build the bundle yourself see `flatpak/README.md` — build on a LOCAL disk
-(flatpak-builder cannot build on CIFS/SMB mounts) and export
-`FrameworkGUI.flatpak`.
-
-The sandbox cannot touch the embedded controller, so the app runs the
-host's `framework_tool` via `flatpak-spawn --host`
-(`--talk-name=org.freedesktop.Flatpak` permission). Install `framework_tool`
-on every host.
-
-## Beyond framework_tool
-
-`framework_tool` talks to the embedded controller, which does not own
-everything worth changing on these machines. Three sections drive other
-tools:
-
-**CPU limits** — sustained and boost power limits. The EC cannot set these,
-so the app picks a backend from the CPU and OS:
-
-| Backend | CPU | OS | Sets |
-| --- | --- | --- | --- |
-| [RyzenAdj](https://github.com/FlyGoat/RyzenAdj) | AMD | Windows, Linux | STAPM / PPT fast / PPT slow — real watts |
-| Linux powercap (RAPL) | Intel, some AMD | Linux | Kernel long/short power limits — real watts |
-| `powercfg` | any | Windows | Max processor state % — a frequency cap, not a wattage |
-
-RyzenAdj and RAPL limits are **volatile**: a reboot clears them, and sleep or
-an AC/battery transition often does too. Re-applying automatically would need
-a service or scheduled task, which this project deliberately does not have —
-so the pane links to the documentation for making it stick with *the tool it
-actually used*: a systemd unit for RyzenAdj or RAPL on Linux, a Task
-Scheduler task for RyzenAdj on Windows. `powercfg` is the exception: it edits
-the saved power scheme, so Windows restores it across reboots on its own, and
-the pane says so instead of telling you to re-apply it.
-
-ARM has no equivalent tool to shell out to, and the pane says that rather
-than showing dead controls.
-
-**Setup** — detects the helper tools and installs them. Every install shows
-the exact command (or the page it will open) and waits for you to confirm;
-nothing installs silently. Where a distro genuinely has no package — RyzenAdj
-is not in Debian, Ubuntu or Fedora — you get upstream's instructions instead
-of a package-manager command that would only fail confusingly. Downloaded
-helpers go in a per-user tools directory, never into the app's own install
-directory.
-
-**Drivers** — links, nothing more. Framework publishes one downloads list per
-device build, always carrying the current BIOS and driver bundle, so the pane
-opens the right one rather than trying to guess which file on the page you
-want. The detected build is offered at the top; every other build is in a
-dropdown below it, for when detection misses or you are fetching drivers for
-a different machine. Vendor pages for parts the bundle does not cover — a
-replacement Wi-Fi card, a Graphics Module, an aftermarket GPU — are listed
-separately.
-
-## Device detection
-
-On launch (and via the "Rescan device" button on the Overview) the GUI runs
-`--versions` once, parses the mainboard type, and shows only the controls
-that apply —
-e.g. stylus/touchscreen on Laptop 12, expansion bay on Laptop 16, RGB LEDs
-on Desktop, and battery/keyboard-light/fingerprint controls only on
-laptops (Desktop has none of those). If detection fails or the board
-string is not recognized, every control is shown rather than guessing.
-
-The Overview also shows a photograph of the detected machine so you can see
-at a glance whether the app got it right. Those are per *chassis*, not per
-mainboard — swapping the mainboard does not change what a Laptop 13 looks
-like — with two exceptions that do change the outside: the Laptop 13 Pro's
-black lid, and a Laptop 16 carrying a Graphics Module.
-
-The six stat cards and the expansion-bay panel need `--power`, `--thermal`
-and `--pdports` as well, which is three more elevated commands. When the app
-is already running as root it reads them on launch; behind `pkexec` that
-would mean three extra password prompts every time you open the window, so
-there it waits for you to press "Rescan device".
-
-## Background footprint
-
-None. No services, timers, tray icons, or autostart entries. A process is
-spawned per button press and exits when the command finishes. This is why
-power limits do not survive a reboot — see the CPU limits section above.
-
-## Running from source / development
-
-```bash
-pip install -r requirements.txt                      # PySide6, the one dependency
-python3 framework_gui.py                             # run it
-python3 -m unittest discover tests -v                # logic + packaging tests
-xvfb-run -a python3 -m unittest discover tests -v    # full suite, headless Linux
-QT_QPA_PLATFORM=offscreen python3 -m unittest discover tests -v   # or this
-ruff check .                                         # lint
-```
-
-The GUI smoke tests skip themselves when PySide6 is missing or no Qt platform
-plugin will start (and on Windows, where their stub binary can't run), so the
-suite is safe to run anywhere. Qt's wheels bring Qt but not the X/EGL
-libraries it links against; on a bare Linux box install `libegl1 libgl1
-libxkbcommon-x11-0 libxcb-cursor0` and friends, as CI does.
-
-Only `framework_gui.py` and `widgets.py` import the toolkit. Everything else
-— parsers, power, deps, drivers, navigation, theme, appstate, backdrop,
-device_images, module_icons — is standard library only and tested without a
-display, and `tests/test_packaging.py` fails if an import of PySide6 creeps
-into one of them. See `CLAUDE.md` for architecture notes, known gotchas, and
-what hasn't been verified yet (this project has not been run against real
-Framework hardware).
-
-## Cutting a release
-
-1. Publish a GitHub Release with a tag like `v1.0.0`.
-2. `.github/workflows/release.yml` fires on *publish*, builds
-   `FrameworkGUI.exe` + `FrameworkGUI-Setup.exe` (stamped with the tag's
-   version) and `FrameworkGUI.flatpak`, and uploads all three to that
-   release.
-3. The download links above start serving them as soon as the run finishes.
-
-Run the workflow manually (`workflow_dispatch`) to rehearse the builds
-without publishing anything — it produces the same artifacts and skips only
-the upload step.
+- [Installation](wiki/Installation.md) — including installing `framework_tool` itself
+- [Using the app](wiki/Using-the-app.md) — the nine sections, one at a time
+- [Device support](wiki/Device-support.md) — which controls each board gets, and why
+- [Troubleshooting](wiki/Troubleshooting.md) — blank readings, idle bays, permission prompts
+- [Architecture](wiki/Architecture.md) and [Development](wiki/Development.md) — for anyone changing it
 
 ## License
 

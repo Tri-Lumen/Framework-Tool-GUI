@@ -23,9 +23,9 @@ the touchscreen bezel and one without get different UIs. Expansion bay and
 RGB are gated on the model number, following the CLI's own documented
 restrictions.
 
-![Laptop 12](../docs/screenshots/device-laptop-12.png)
-![Laptop 16](../docs/screenshots/device-laptop-16.png)
-![Desktop](../docs/screenshots/device-desktop.png)
+![Laptop 12](screenshots/device-laptop-12.png)
+![Laptop 16](screenshots/device-laptop-16.png)
+![Desktop](screenshots/device-desktop.png)
 
 ## Chassis drawing
 

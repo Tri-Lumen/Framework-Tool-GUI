@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import theme  # noqa: E402
+from frameworkgui import theme  # noqa: E402
 
 
 class TestPalette(unittest.TestCase):

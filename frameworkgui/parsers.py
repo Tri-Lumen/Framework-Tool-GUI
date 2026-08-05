@@ -1,9 +1,9 @@
 """
 Pure-Python parsing and device-detection logic for Framework System GUI.
 
-Deliberately has zero dependency on tkinter (or anything else non-stdlib) so
-it can be unit-tested without a display, Xvfb, or tkinter being installed.
-framework_gui.py imports everything it needs from here.
+Deliberately has zero dependency on PySide6 (or anything else non-stdlib)
+so it can be unit-tested without a display or a Qt platform plugin. `app`
+imports everything it needs from here.
 
 The framework_tool CLI does not guarantee a stable output format (the
 upstream repo says so explicitly), so every regex here is best-effort:
@@ -46,9 +46,15 @@ RE_ROLE = re.compile(r"^\s*(?:Power\s+)?Role:\s*(\w+)", re.MULTILINE)
 RE_VOLTAGE_NOW = re.compile(r"Voltage Now:\s*([\d.]+)\s*V")
 RE_CURRENT_LIM = re.compile(r"Current Lim:\s*(\d+)\s*mA")
 RE_MAX_POWER = re.compile(r"Max Power:\s*([\d.]+)\s*W")
+# "Charging Type: PD" / "Proprietary" / "None" — how the port is being fed,
+# which is worth saying on a bay whose wattage could not be derived.
+RE_CHARGING_TYPE = re.compile(r"Charging Type:\s*(\w+)")
 
-# Roles that mean "nothing is attached to this port".
-IDLE_ROLES = frozenset(("disconnected", "nothing", "unknown", "?"))
+# Roles that mean "nothing is attached to this port". Everything else —
+# Sink, Source, and whatever a future firmware calls a connected state —
+# means something is, which is deliberately the fail-open direction: a bay
+# wrongly called idle is a machine that looks unplugged while charging.
+IDLE_ROLES = frozenset(("disconnected", "nothing", "none", "unknown", "?"))
 
 # ---------- device detection (--versions) ----------
 
@@ -99,14 +105,25 @@ def parse_ports(text):
         # current limit are what the port is actually carrying; Max Power is
         # only the ceiling, kept separate so the UI never shows a headline
         # wattage the port is not delivering.
+        #
+        # Each value is kept on its own. They used to be taken as a pair,
+        # and a port that reported a voltage but no current — which is what
+        # the charging port on a real Laptop 13 did — came back with
+        # neither, and so with nothing to say about a bay the machine was
+        # visibly running on.
         volts = RE_VOLTAGE_NOW.search(block)
         amps = RE_CURRENT_LIM.search(block)
-        if volts and amps:
+        if volts:
             d["volts"] = float(volts.group(1))
+        if amps:
             d["ma"] = int(amps.group(1))
+        if volts and amps:
             watts = d["volts"] * d["ma"] / 1000.0
             if watts:
                 d["watts"] = round(watts, 1)
+        charging = RE_CHARGING_TYPE.search(block)
+        if charging and charging.group(1).lower() not in ("none", "unknown"):
+            d["charging"] = charging.group(1)
         power = RE_MAX_POWER.search(block)
         if power:
             d["max_watts"] = float(power.group(1))
@@ -114,17 +131,46 @@ def parse_ports(text):
     return ports
 
 
-def port_is_live(port):
-    """Did this bay negotiate anything, or is it sitting idle?
+def port_attached(port):
+    """Is something plugged into this port?
 
-    A port with a wattage but a disconnected role is still idle — the
-    chromebook path reports a voltage rail on ports with nothing in them.
+    The role is the answer, and the *only* answer: a port reporting Sink is
+    drawing power from whatever is attached to it whether or not the EC
+    also filled in a current. On a real Laptop 13 the charging port read
+    `Role: Sink` with no usable current beside it, and asking for a
+    wattage first — as this used to — reported the port the machine was
+    running on as idle.
+
+    A port with a wattage but a disconnected role is still idle, though:
+    the chromebook path reports a voltage rail on ports with nothing in
+    them.
     """
     if not port:
         return False
-    if (port.get("role") or "?").lower() in IDLE_ROLES:
-        return False
-    return bool(port.get("watts"))
+    role = (port.get("role") or "?").lower()
+    return bool(role) and role not in IDLE_ROLES
+
+
+def port_watts(port):
+    """The wattage this port is actually carrying, or None.
+
+    None is a real answer and means "attached, but the EC did not say how
+    much" — which is not the same as zero and must not be shown as one.
+    """
+    if not port_attached(port):
+        return None
+    watts = port.get("watts")
+    return watts if watts else None
+
+
+def port_is_live(port):
+    """Attached *and* carrying a measurable load.
+
+    Kept apart from `port_attached` for the callers that go on to print
+    volts and amps: those need the numbers to exist, and this is the
+    question they are really asking.
+    """
+    return port_watts(port) is not None
 
 
 # A settings "Get" prints one value in one of a few shapes. These cover the
@@ -264,6 +310,37 @@ def parse_firmware(versions_text):
             value = _labelled(text.splitlines(), (header,))
         out[key] = value
     return out
+
+
+# An EC version string carries far more than a version:
+#
+#   azalea_v3.4.113405-ec:e0a4f2,os:7b88e1,cmsis:4aa3ff 2026-05-20 05:29:08
+#   marigold1@ip-172-26-3-226
+#
+# — the three component commit hashes, the build timestamp and the hostname
+# of the machine that built it. The version is the first field; the rest is
+# provenance, and on a real Laptop 13 it wrapped the Overview's sub-line
+# onto three lines.
+RE_FIRMWARE_HASHES = re.compile(r"-(?:\w+:[0-9a-f]{4,},?)+$", re.IGNORECASE)
+
+
+def short_firmware(value, limit=28):
+    """A firmware version at the length a sub-line can carry.
+
+    Trims the build provenance, never the version. Anything that is already
+    short enough is returned untouched, and anything still too long after
+    trimming is cut with an ellipsis rather than silently misreported — the
+    full string is in the sub-line's tooltip either way.
+    """
+    text = " ".join((value or "").split())
+    if not text:
+        return ""
+    head = text.split(" ")[0]                  # drop timestamp and builder
+    head = RE_FIRMWARE_HASHES.sub("", head)    # drop the component hashes
+    head = head or text
+    if len(head) <= limit:
+        return head
+    return head[:limit - 1] + "…"
 
 
 def parse_tool_version(version_text):

@@ -24,36 +24,38 @@ if errorlevel 1 (
 
 if exist "%WORK%" rmdir /s /q "%WORK%"
 mkdir "%WORK%" || goto :fail
-REM Every module framework_gui.py imports has to come along. Miss one and
-REM PyInstaller happily builds an exe that dies with ModuleNotFoundError on
-REM launch - invisible from a source checkout, where the import works.
-REM tests/test_packaging.py fails if this list falls behind the repo.
-for %%M in (framework_gui.py app_icon.py appstate.py backdrop.py deps.py device_images.py drivers.py module_icons.py navigation.py parsers.py power.py theme.py widgets.py) do (
-    copy /y "%SRC%..\%%M" "%WORK%\" >nul || (
-        echo Could not copy %%M - check the share is reachable.
-        goto :fail
-    )
-)
-
-REM The device photographs the Overview shows. --add-data below is what
-REM carries them into the exe; device_images.py finds them again through
-REM sys._MEIPASS.
-xcopy /e /i /y "%SRC%..\assets" "%WORK%\assets" >nul || (
-    echo Could not copy the assets directory - check the share is reachable.
+REM The launcher, and the package it imports. This used to be a list of
+REM module filenames that had to be edited every time a module was added -
+REM and a missed one built an exe that died with ModuleNotFoundError on a
+REM machine that had never seen the source. Copying the directory cannot
+REM fall behind.
+copy /y "%SRC%..\framework_gui.py" "%WORK%\" >nul || (
+    echo Could not copy framework_gui.py - check the share is reachable.
     goto :fail
 )
+REM /exclude keeps __pycache__ out of the exe; the .pyc files in it are for
+REM whatever Python built them, which is not necessarily this one.
+xcopy /e /i /y "%SRC%..\frameworkgui" "%WORK%\frameworkgui" >nul || (
+    echo Could not copy the frameworkgui package - check the share is reachable.
+    goto :fail
+)
+if exist "%WORK%\frameworkgui\__pycache__" rmdir /s /q "%WORK%\frameworkgui\__pycache__"
 
 pushd "%WORK%" || goto :fail
 REM PySide6-Essentials rather than the full PySide6: the app uses
-REM QtWidgets, QtGui, QtCore and QtSvg, and the extras (WebEngine, 3D,
+REM QtWidgets, QtGui and QtCore - the icons are drawn by iconpaths.py, so
+REM QtSvg is not needed - and the extras (WebEngine, 3D,
 REM Charts) would add hundreds of megabytes to the exe for nothing.
 %PY% -m pip install --upgrade pyinstaller "PySide6-Essentials>=6.6" || (popd & goto :fail)
 REM --icon is what puts the Framework mark on the exe itself (Explorer,
 REM the taskbar, Alt-Tab). The same .ico is bundled via --add-data so the
 REM running app can load it for its window icon through sys._MEIPASS.
+REM --add-data puts the assets at the root of the unpacked tree, which is
+REM where app_icon/device_images look for them via sys._MEIPASS - they live
+REM inside the package in the repo, but not in the bundle.
 %PY% -m PyInstaller --onefile --noconsole --uac-admin --name FrameworkGUI ^
-    --icon "assets\icons\FrameworkGUI.ico" ^
-    --add-data "assets;assets" framework_gui.py || (popd & goto :fail)
+    --icon "frameworkgui\assets\icons\FrameworkGUI.ico" ^
+    --add-data "frameworkgui\assets;assets" framework_gui.py || (popd & goto :fail)
 popd
 
 if not exist "%SRC%dist" mkdir "%SRC%dist"

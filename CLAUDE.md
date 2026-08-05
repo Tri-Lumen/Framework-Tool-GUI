@@ -42,38 +42,49 @@ when that command finishes.
 
 ## Quick orientation
 
+The app is the `frameworkgui` package; `framework_gui.py` at the repository
+root is a five-line launcher that imports it, and is what every packaging
+path points at. Paths below are inside the package unless stated.
+
 ```
-framework_gui.py      Qt app — layout, command execution, the 12 diagnostics.
+framework_gui.py      The launcher. One import, one call to main().
+frameworkgui/
+  app.py               Qt app — layout, command execution, the 12 diagnostics.
                         One of only two modules that import PySide6.
-widgets.py             Reusable UI pieces: Panel, Card, Bar, TimedBar, Badge,
-                        RailButton, PaneItem, Segmented, Grabber, ChassisDiagram,
-                        ModuleIcon, MetricPanel, SensorRow, ImageSlot,
-                        Spinner. No colour literals — tokens by name only.
-theme.py               Design tokens + the Qt style sheet rendered from them.
+  widgets.py           Reusable UI pieces: Panel, Card, Bar, TimedBar, Badge,
+                        RailButton, PaneItem, Segmented, Grabber,
+                        ChassisDiagram, ModuleIcon, MetricPanel, SensorRow,
+                        ImageSlot, Spinner. No colour literals — tokens by
+                        name only.
+  theme.py             Design tokens + the Qt style sheet rendered from them.
                         No toolkit import: the sheet is a string.
-navigation.py          Rail groups, pane items, and the declarative content of
+  navigation.py        Rail groups, pane items, and the declarative content of
                         every gated pane (12 tools, 9 port queries, 9 settings
                         rows, 2 charge presets). Keys, not bound methods, so
                         it stays testable.
-appstate.py            The two persisted UI choices (appearance, drawer height).
-backdrop.py            Compositing probe + the Windows 11 backdrop call.
-device_images.py       Board string → product photograph, and the chassis
+  appstate.py          The two persisted UI choices (appearance, drawer height).
+  backdrop.py          Compositing probe + the Windows 11 backdrop call.
+  device_images.py     Board string → product photograph, and the chassis
                         dimensions/bay count the Overview drawing is scaled
                         from. Filenames and numbers only.
-module_icons.py        Expansion-card SVG paths + the module classifier.
-app_icon.py            The app icon's filenames and where each packaging path
+  iconpaths.py         The icon path language, parsed by us: path string →
+                        move/line/cubic/close, arcs converted here. Qt's SVG
+                        renderer does not do this reliably in the packaged
+                        Windows build. Stdlib only.
+  module_icons.py      Expansion-card icon paths + the module classifier.
+  app_icon.py          The app icon's filenames and where each packaging path
                         finds them. Stdlib only, like device_images.
-parsers.py             Pure-Python: regex parsers + detect_model(). No toolkit
+  parsers.py           Pure-Python: regex parsers + detect_model(). No toolkit
                         import, so it's unit-testable without a display.
-power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
+  power.py             CPU power-limit (TDP) backends — ryzenadj / RAPL /
                         powercfg. Builds commands, does no I/O of its own.
-deps.py                Helper-tool registry: detect, and build install plans.
-drivers.py             Framework download-page catalog. Links only, no I/O.
-                        (everything except framework_gui.py and widgets.py
-                        follows parsers.py's rules: stdlib only, no toolkit
-                        import, I/O injected as arguments)
-assets/devices/        One product photograph per chassis, for the Overview.
-assets/icons/          The Framework mark: a multi-resolution .ico for Windows
+  deps.py              Helper-tool registry: detect, and build install plans.
+  drivers.py           Framework download-page catalog. Links only, no I/O.
+                        (everything except app.py and widgets.py follows
+                        parsers.py's rules: stdlib only, no toolkit import,
+                        I/O injected as arguments)
+  assets/devices/      One product photograph per chassis, for the Overview.
+  assets/icons/        The Framework mark: a multi-resolution .ico for Windows
                         and PNGs for the window icon and the Flatpak theme.
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
 tests/test_power.py    Unit tests for power.py — unit conversions especially.
@@ -95,6 +106,9 @@ tests/test_device_images.py  Board → photograph, plus that every image the
                         catalog names is actually shipped and small enough.
 tests/test_module_icons.py   Icon paths are well-formed and inside their
                         viewBox; the classifier declines to guess.
+tests/test_iconpaths.py Every command in the path language, the arc geometry,
+                        and every icon the app ships — parsed, measured and
+                        bounds-checked without a display.
 tests/test_smoke_gui.py Full-app tests: real App(), real event loop, stub CLI
                         binary on PATH, assert on which controls survive
                         gating. Needs PySide6 and a platform plugin
@@ -106,6 +120,8 @@ tests/test_packaging.py Asserts every app module and every device image is
                         an uninstaller and a Start Menu entry, and that the
                         release workflow produces exactly the assets the
                         README links. No display, no build tooling needed.
+wiki/                  The published wiki pages, and the screenshots they
+                        use. Reviewed alongside the code they describe.
 windows/               build.bat (PyInstaller), installer.iss (Inno Setup),
                         install.ps1 / install-exe.ps1 (+ .cmd wrappers), uninstall
 flatpak/               manifest, .desktop, launcher script, icon, its own README
@@ -119,7 +135,7 @@ README.md              User-facing install/usage instructions
 ```
 
 Run the tests before changing `parsers.py` or the gating logic in
-`framework_gui.py` — they're fast (< 1s) and they're what caught a real race
+`frameworkgui/app.py` — they're fast (< 1s) and they're what caught a real race
 condition during development (see "Known gotchas" below).
 
 ```bash
@@ -141,7 +157,7 @@ failure mode to watch for.
   holds every regex used to scrape `framework_tool`'s text output, plus
   `detect_model()`, which turns `--versions` output into a capability dict
   (`is_laptop`, `has_touchscreen`, `has_expansion_bay`, etc). Keep new
-  parsing logic here, not inline in `framework_gui.py`, so it stays testable
+  parsing logic here, not inline in `app.py`, so it stays testable
   without a toolkit.
 
 - **The CLI has no stable output format.** The upstream repo says so
@@ -173,7 +189,7 @@ failure mode to watch for.
   own documented restrictions (`EXAMPLES.md` says expansion bay is
   "Laptop 16 only" and RGB is "Framework Desktop" only).
 
-- **The UI layer is exactly two modules.** `framework_gui.py` and
+- **The UI layer is exactly two modules.** `app.py` and
   `widgets.py` import PySide6; nothing else does, and
   `tests/test_packaging.py` fails if that changes. That line is what keeps
   the gating rules, the token table and every parser testable in
@@ -192,7 +208,7 @@ failure mode to watch for.
 - **Navigation is data.** `navigation.py` holds the five rail groups, the
   nine sections, and the declarative content of every gated pane: the 14
   diagnostics, the 9 port queries, the 9 settings rows. Rows name a *key*;
-  `framework_gui.py` maps the key to a method or a widget. A list holding
+  `app.py` maps the key to a method or a widget. A list holding
   bound methods could only be tested by constructing the app, which needs a
   display — this way `tests/test_navigation.py` makes the same gating
   assertions the smoke tests make, without one.
@@ -208,6 +224,28 @@ failure mode to watch for.
   translucency without one; on Windows 11 it is the real system backdrop.
   (The handoff's table numbers the `DWM_SYSTEMBACKDROP_TYPE` values one
   higher than the Windows SDK does; `backdrop.py` follows the SDK.)
+
+- **The Windows backdrop takes four things, not one.** Setting
+  `DWMWA_SYSTEMBACKDROP_TYPE` on its own returns success and changes
+  nothing on screen — which is exactly what a real Windows 11 machine
+  showed. All four are needed:
+  1. `DwmExtendFrameIntoClientArea` with `-1` margins, or the backdrop is
+     drawn behind the frame only and the client area stays as opaque as it
+     was;
+  2. `WA_TranslucentBackground` **and** `WA_NoSystemBackground` on the
+     window, or Qt fills the client area with the palette's window brush
+     before anything else paints;
+  3. the call made *after* the window is shown — toggling
+     `WA_TranslucentBackground` makes Qt destroy and recreate the native
+     window, and the recreated one is a fresh HWND with none of these
+     attributes. `App.showEvent` re-applies on every show, deferred a turn;
+  4. Settings › Personalisation › Colours › "Transparency effects" on. With
+     it off DWM accepts the call and draws a flat surface, so
+     `backdrop.translucency_state` reads the registry value and answers
+     "no" rather than letting the status bar claim an acrylic that is not
+     on screen.
+  `apply_windows_backdrop` returns whether the backdrop type was accepted
+  and the app believes it: a refusal forces opaque and shows the strip.
 
 - **The drawer is the output pane, one tab per program.** Every command is
   echoed as a `$ …` line into a log named for the program that ran it —
@@ -233,16 +271,21 @@ failure mode to watch for.
   beyond `path_for()`; a build shipped without the images falls back to the
   text slot in `widgets.ImageSlot` rather than showing a blank rectangle.
 
-- **Icon paths spell every command out.** SVG lets a path imply a lineto
-  (`M2.5 8 9 3`) and lets an arc repeat without its letter. Both are legal
-  and neither is reliably parsed by the Qt in the packaged Windows build —
-  it drew the first segment and dropped the rest, which is why four of five
-  rail icons rendered as a bare diagonal stroke on a real machine while the
-  two written longhand were fine. `tests/test_navigation.TestIconPaths`
-  counts the arguments after each command letter and fails on a shorthand,
-  and `tests/test_module_icons` runs the same check over the module marks.
-  Nothing warns you about this: the paths are strings, they render correctly
-  under the Qt used in CI, and the failure only appears in the shipped build.
+- **The icons are parsed by us, not by Qt.** Writing every path command out
+  longhand was the first attempt at this and it was not enough: the rail
+  icons still came out as fragments on a real Windows machine. Qt's SVG
+  renderer is the variable, and it cannot be tested from here — the same
+  strings render perfectly under the Qt in CI, so the failure only exists in
+  the shipped build. `iconpaths.py` turns a path string into
+  move/line/cubic/close operations (arcs converted with the spec's endpoint
+  parameterization), `widgets.icon_path` walks those into a `QPainterPath`,
+  and `stroke_pixmap` strokes it with a `QPen`. No QtSvg import anywhere in
+  the app now. `tests/test_iconpaths.py` parses and measures every icon the
+  app ships, which is the check that was impossible while Qt owned the
+  parsing. The paths still spell their commands out and
+  `tests/test_navigation.TestIconPaths` still checks that — a readability
+  rule now rather than a workaround, since the parser handles the shorthands
+  correctly.
 
 - **Ports are read through two commands, not one.** `--pdports` uses a
   Framework-specific EC command (`0x3E23`) that not every EC firmware
@@ -255,6 +298,27 @@ failure mode to watch for.
   instead of `Negotiated:`), so `parse_ports` reads both and
   `readings["ports_source"]` records which one answered. Keep the fallback:
   it is the difference between the bay panel working and not.
+
+- **The role says whether a port is in use; the wattage does not.** A real
+  Laptop 13 reported `Role: Sink` on the port it was charging through with
+  `Current Lim: 0 mA` beside it, so a wattage derived from voltage × current
+  came out as nothing and the machine showed four idle bays while its AC
+  card read 51.5 W. `parsers.port_attached` asks the role and only the role;
+  `port_watts` returns None — not zero — when the numbers are missing, and
+  `port_is_live` (attached *and* measurable) is what the callers that go on
+  to print volts and amps use. `parse_ports` also keeps a voltage that
+  arrives without a current instead of dropping both.
+
+- **Neither port command can see the card in the bay.** USB-C and USB-A
+  expansion cards are passive passthroughs: there is nothing on them to
+  enumerate, so `--pdports`/`--pdports-chromebook` describe the mainboard
+  port behind the card and nothing else. A bay with a USB-C card and nothing
+  plugged into it therefore reads idle, correctly — it just used to say
+  "disconnected · idle", which reads as a failure to detect a card that is
+  visibly there. The rows say "nothing attached", the panel caption says the
+  CLI cannot see which card is fitted, and `_fill_cards` spells out why
+  (`App.PASSIVE_CARDS_NOTE`). Only `--dp-hdmi-info` and `--audio-card-info`
+  ever name a module, and neither says which bay it is in.
 
 - **A reading command logs its output.** The Overview scan used to run four
   commands silently, so the drawer showed four bare `$` lines and a failed
@@ -322,6 +386,20 @@ failure mode to watch for.
   never filled in at all. `SETTINGS_ROWS["parse"]` names the reader,
   `App.SETTING_PARSERS` maps it.
 
+- **A reading is trimmed for the line it goes on, never for the log.** The
+  Overview sub-line arrives longer than it is useful from two directions: on
+  Windows the CPU is `%PROCESSOR_IDENTIFIER%` — "AMD64 Family 25 Model 116
+  Stepping 1, AuthenticAMD", which names a generation rather than a chip —
+  and an EC version carries three component commit hashes, a build timestamp
+  and the hostname of the machine that built it. On a real Laptop 13 that
+  wrapped onto three lines. `app.windows_cpu_brand` reads
+  `ProcessorNameString` from the registry (the name the vendor actually
+  ships), `power.short_cpu_label` trims it to "Ryzen 7 7840U" and returns
+  **empty** for a CPUID dump rather than shortening nonsense, and
+  `parsers.short_firmware` keeps the version and drops the provenance. The
+  untrimmed strings are the sub-line's tooltip (`App._device_detail`) and the
+  drawer still shows every command's raw output verbatim.
+
 - **Ask whether there is AC before reporting AC watts.** The charger voltage
   and input current are printed whether or not an adapter is attached and
   are not zero on battery, so multiplying them unconditionally showed a few
@@ -343,7 +421,7 @@ failure mode to watch for.
   keyboard and trackpad, so switching it off leaves the machine without
   either). Never give one of these a neutral button.
 
-- **Command execution wrapping** (`_build_cmd` in `framework_gui.py`):
+- **Command execution wrapping** (`_build_cmd` in `app.py`):
   `[binary] + args`, optionally prefixed with `pkexec` (Linux, unless
   already root) and/or `flatpak-spawn --host` (when running inside the
   Flatpak sandbox — the sandbox can't reach the EC at all, so this is a
@@ -396,7 +474,7 @@ failure mode to watch for.
     app's only network access now lives in `deps.py` (fetching a helper's
     GitHub release), which is why the Flatpak needs no `--share=network`.
 
-- **Blocked commands** (`App.BLOCKED` in `framework_gui.py`):
+- **Blocked commands** (`App.BLOCKED` in `app.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
   `-f`/`--force`. These can brick the hardware; they're excluded from every
   button *and* from the free-form custom-args field. `--console follow` is
@@ -450,20 +528,20 @@ failure mode to watch for.
    window should be on screen before a scan that can take seconds reports
    back into it. Do the same for any new startup-time background work.
 
-5. **The app is twelve modules plus an assets directory, and every
-   packaging path has to carry all of them.** The original single-file
-   packaging (PyInstaller work dir, `install.ps1`, the Flatpak manifest)
-   shipped only `framework_gui.py`, which produces an exe/Flatpak that dies
-   with `ModuleNotFoundError: No module named 'parsers'` on launch —
-   invisible until you run the *packaged* build, since running from a source
-   checkout always works. The redesign multiplied the ways to get this
-   wrong: seven more modules, seven device images, and PySide6 itself.
-   `tests/test_packaging.py` fails if a root-level module or a device image
-   is missing from any packaging path, and if the Flatpak manifest stops
-   installing PySide6. If you add a module or an image, update
-   `windows/build.bat`, `windows/install.ps1`, and
-   `flatpak/io.github.frameworkgui.FrameworkGUI.yml` (both the
-   `install -Dm644` command and the `sources:` list).
+5. **Every packaging path has to carry the whole app, and the file list is
+   what kept falling behind.** The original single-file packaging shipped
+   only `framework_gui.py`, producing an exe/Flatpak that died with
+   `ModuleNotFoundError: No module named 'parsers'` on launch — invisible
+   until you run the *packaged* build, since a source checkout always works.
+   Each new module made it more likely again, because three scripts each
+   held their own list of filenames. The `frameworkgui` package is the fix:
+   `windows/build.bat` and `windows/install.ps1` copy the **directory**, so
+   a new module needs no edit there at all, and the assets moved inside it
+   so they travel the same way. The Flatpak manifest is the one exception —
+   flatpak-builder's `file` sources are one file each, so a new module still
+   needs its `install -Dm644` line and its `sources:` entry there.
+   `tests/test_packaging.py` fails until it does, and also fails if a Python
+   file other than the launcher appears at the repository root.
 
    The images have one extra wrinkle: PyInstaller's `--onefile` unpacks
    bundled data into a temporary tree it advertises as `sys._MEIPASS`, so
@@ -519,31 +597,59 @@ failure mode to watch for.
   a real Framework device, that's the highest-value next step: run each
   diagnostic and each Ports & modules query and diff actual output against
   the samples in `tests/test_parsers.py`.
-  One round of that has now happened, from a user's screenshot on a Laptop
-  13 AMD (EC `azalea_v3.4`), and it found three real mismatches: `--pdports`
-  named no ports at all on that EC (hence the `--pdports-chromebook`
-  fallback), `--charge-limit`'s two percentages were read in the wrong
-  order, and the AC card multiplied charger registers that are non-zero on
-  battery. Assume there are more.
+  Two rounds of that have now happened, both from a user's screenshots of a
+  Laptop 13 AMD (EC `azalea_v3.4`), and between them they found five real
+  mismatches: `--pdports` named no ports at all on that EC (hence the
+  `--pdports-chromebook` fallback), `--charge-limit`'s two percentages were
+  read in the wrong order, the AC card multiplied charger registers that are
+  non-zero on battery, the charging port reported `Sink` with no current
+  limit beside it so every bay read idle, and the Overview's sub-line was
+  three wrapped lines of CPUID string and EC build provenance. Assume there
+  are more.
 - **The whole app has only ever run under Xvfb and Qt's offscreen
   platform.** The layout was checked by screenshotting all nine sections at
   the design's 1180x780 and comparing them to the handoff's captures, which
   is a real check but not the same as using it. Nothing has exercised a
   window manager, a HiDPI screen, a font that is not DejaVu, or the
   responsive collapse below 1040px on a real desktop.
-- **Acrylic has never been composited.** `backdrop.py`'s decision table is
-  unit-tested, but the CI environment has no compositor, so every screenshot
-  is the opaque path. The Windows 11 `DwmSetWindowAttribute` call, the dark
-  native titlebar it also asks for, and translucency under a real Wayland or
-  KWin session are all unexercised. If it looks wrong on Windows, check the
-  `DWM_SYSTEMBACKDROP_TYPE` value first — the handoff and the SDK disagree
-  about the numbering and this follows the SDK.
+- **Acrylic has never been composited here, and the Windows path has been
+  wrong once already.** `backdrop.py`'s decision table is unit-tested, but
+  the CI environment has no compositor, so every screenshot is the opaque
+  path. On a real Windows 11 machine the first version of this did nothing
+  visible: it set `DWMWA_SYSTEMBACKDROP_TYPE` on a window handle that Qt
+  then replaced, never extended the frame into the client area, and left
+  Qt's own opaque window brush painting over whatever DWM drew. All four
+  parts of the fix — see "The Windows backdrop takes four things" above —
+  are still unverified on real hardware, as are the dark native titlebar and
+  translucency under a real Wayland or KWin session. If it still looks
+  wrong, check in this order: is Transparency effects on in Settings; does
+  the status bar say "Acrylic on" or has the app fallen back; then the
+  `DWM_SYSTEMBACKDROP_TYPE` value (the handoff and the SDK disagree about
+  the numbering and this follows the SDK).
+- **The icons now render correctly under this renderer, which is not the
+  same as under Windows.** The reason for writing `iconpaths.py` was that Qt
+  rendered them differently in the packaged build than in CI, and the new
+  path is exercised in exactly the same places the old one was: Xvfb and Qt
+  offscreen. It has one real advantage — the geometry is ours, unit-tested,
+  and no longer depends on QtSvg being collected or on which Qt the exe was
+  built against — but a look at the built exe is still what confirms it.
 - **IBM Plex is specified but not vendored.** `theme.py` names IBM Plex Sans
   and Mono; no font files are in the repo, so every build falls back to the
   platform's own sans and mono faces. `load_fonts()` will pick up
   `.ttf`/`.otf` files dropped into a `fonts/` directory next to the modules,
   which is the intended way to add them (they are OFL and free to bundle).
   Until then the type is right in size and weight but not in face.
+- **The move to a package has not been through a packaged build.** The app
+  became `frameworkgui/` with a launcher at the root, and every packaging
+  path was rewritten for it: `build.bat` and `install.ps1` copy the
+  directory, the Flatpak manifest installs each module into the package
+  directory, PyInstaller's `--add-data` maps `frameworkgui\assets` to
+  `assets` so `sys._MEIPASS` resolution is unchanged. CI builds the exe on
+  every push, so a broken Windows path shows up there; the Flatpak is only
+  built on release or `workflow_dispatch`, so rehearse that before cutting
+  one. A copied-install simulation (launcher + package in an empty
+  directory, repo off `sys.path`) does resolve both the icons and the device
+  images.
 - **The device photographs came from the project owner, not from a licence
   check.** They are Framework product images; the repo carries no note of
   what permits their redistribution. Sort that out before publishing a
@@ -646,16 +752,18 @@ especially the Flatpak job, which had never been run when it was written.
 
 ## Suggested next steps, roughly in priority order
 
-1. Rehearse `.github/workflows/release.yml` with `workflow_dispatch`. The
-   Flatpak manifest was rewritten from source-built Tcl/Tk/CPython to the
-   KDE runtime plus pinned PySide6 wheels and has not been built once; the
-   Windows build now installs PySide6 and bundles `assets/`. Both are new
-   and both are between you and a release.
+1. Rehearse `.github/workflows/release.yml` with `workflow_dispatch`. Every
+   packaging path was rewritten for the `frameworkgui` package, and the
+   Flatpak one has never been built successfully even before that — it went
+   from source-built Tcl/Tk/CPython to the KDE runtime plus pinned PySide6
+   wheels and has not been run once. This is between you and a release.
 2. Launch the built exe and the built Flatpak and look at them. Everything
    so far has been Xvfb and Qt's offscreen platform — no window manager, no
    HiDPI, no real fonts. This is where a packaged-only failure (a missing
    Qt platform plugin, an asset that did not make it into `sys._MEIPASS`)
-   would show up.
+   would show up — and it is also the only way to confirm the rail icons,
+   whose whole reason for being redrawn by `iconpaths.py` was that the
+   packaged Qt rendered them differently from the Qt in CI.
 3. Get access to a real Framework device (any model) and validate the
    parsers/detection against real `--versions`/`--power`/`--thermal`/
    `--pdports` output. Still the single highest-value thing for correctness,
@@ -663,11 +771,13 @@ especially the Flatpak job, which had never been run when it was written.
    output.
 4. See acrylic composited for the first time: Windows 11 for the real system
    backdrop and the dark titlebar, a Wayland or KWin session for the Linux
-   translucency path. Check the fallback strip appears where it should.
+   translucency path. Check the fallback strip appears where it should, and
+   that turning Transparency effects off in Windows Settings produces the
+   strip rather than a status bar claiming an acrylic that is not there.
 5. Vendor IBM Plex Sans/Mono into `fonts/` (OFL, free to bundle) so the type
    matches the design instead of falling back to the platform's faces.
-6. Settle the licence position on `assets/devices/*.png` and write it down,
-   or replace them.
+6. Settle the licence position on `frameworkgui/assets/devices/*.png` and
+   write it down, or replace them.
 7. Run `FrameworkGUI-Setup.exe` on a real Windows machine: install,
    Start Menu group, uninstall, reinstall over the top. CI proves it
    compiles, nothing yet proves it installs.

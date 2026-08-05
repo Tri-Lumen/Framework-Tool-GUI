@@ -37,7 +37,8 @@ modules:
     sources:
       # Binary wheels, pinned by hash and fetched by flatpak-builder.
       # PySide6-Essentials rather than the full PySide6: the app uses
-      # QtWidgets, QtGui, QtCore and QtSvg, and the extras (WebEngine, 3D,
+      # QtWidgets, QtGui and QtCore (the icons are drawn by iconpaths.py,
+      # so QtSvg is not needed), and the extras (WebEngine, 3D,
       # Charts) would roughly triple the bundle for nothing.
       - type: file
         url: https://files.pythonhosted.org/packages/b2/e9/5c0c67de510da7818703d01123f7998cc495e99c0e6979a6ed6eb2ee09d0/shiboken6-6.7.3-cp39-abi3-manylinux_2_28_x86_64.whl
@@ -52,51 +53,57 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm644 framework_gui.py /app/share/framework-gui/framework_gui.py
-      # framework_gui.py imports these from its own directory - shipping it
-      # without any one of them gives an app that dies on launch.
-      - install -Dm644 app_icon.py /app/share/framework-gui/app_icon.py
-      - install -Dm644 appstate.py /app/share/framework-gui/appstate.py
-      - install -Dm644 backdrop.py /app/share/framework-gui/backdrop.py
-      - install -Dm644 deps.py /app/share/framework-gui/deps.py
-      - install -Dm644 device_images.py /app/share/framework-gui/device_images.py
-      - install -Dm644 drivers.py /app/share/framework-gui/drivers.py
-      - install -Dm644 module_icons.py /app/share/framework-gui/module_icons.py
-      - install -Dm644 navigation.py /app/share/framework-gui/navigation.py
-      - install -Dm644 parsers.py /app/share/framework-gui/parsers.py
-      - install -Dm644 power.py /app/share/framework-gui/power.py
-      - install -Dm644 theme.py /app/share/framework-gui/theme.py
-      - install -Dm644 widgets.py /app/share/framework-gui/widgets.py
-      # The Overview's device photographs. device_images.py looks for them
-      # relative to the module directory, so they land beside it.
+      # The launcher imports the package beside it; every module in
+      # it has to be here or the app dies on launch. flatpak-builder's
+      # file sources are one file each, which is why this list is
+      # explicit - tests/test_packaging.py fails when it falls behind.
+      - install -Dm644 __init__.py /app/share/framework-gui/frameworkgui/__init__.py
+      - install -Dm644 __main__.py /app/share/framework-gui/frameworkgui/__main__.py
+      - install -Dm644 app.py /app/share/framework-gui/frameworkgui/app.py
+      - install -Dm644 app_icon.py /app/share/framework-gui/frameworkgui/app_icon.py
+      - install -Dm644 appstate.py /app/share/framework-gui/frameworkgui/appstate.py
+      - install -Dm644 backdrop.py /app/share/framework-gui/frameworkgui/backdrop.py
+      - install -Dm644 deps.py /app/share/framework-gui/frameworkgui/deps.py
+      - install -Dm644 device_images.py /app/share/framework-gui/frameworkgui/device_images.py
+      - install -Dm644 drivers.py /app/share/framework-gui/frameworkgui/drivers.py
+      - install -Dm644 iconpaths.py /app/share/framework-gui/frameworkgui/iconpaths.py
+      - install -Dm644 module_icons.py /app/share/framework-gui/frameworkgui/module_icons.py
+      - install -Dm644 navigation.py /app/share/framework-gui/frameworkgui/navigation.py
+      - install -Dm644 parsers.py /app/share/framework-gui/frameworkgui/parsers.py
+      - install -Dm644 power.py /app/share/framework-gui/frameworkgui/power.py
+      - install -Dm644 theme.py /app/share/framework-gui/frameworkgui/theme.py
+      - install -Dm644 widgets.py /app/share/framework-gui/frameworkgui/widgets.py
+      # The Overview's device photographs. device_images.py looks for
+      # them relative to its own module, so they land inside the package.
       - install -Dm644 desktop.png
-        /app/share/framework-gui/assets/devices/desktop.png
+        /app/share/framework-gui/frameworkgui/assets/devices/desktop.png
       - install -Dm644 laptop-12.png
-        /app/share/framework-gui/assets/devices/laptop-12.png
+        /app/share/framework-gui/frameworkgui/assets/devices/laptop-12.png
       - install -Dm644 laptop-13.png
-        /app/share/framework-gui/assets/devices/laptop-13.png
+        /app/share/framework-gui/frameworkgui/assets/devices/laptop-13.png
       - install -Dm644 laptop-13-pro.png
-        /app/share/framework-gui/assets/devices/laptop-13-pro.png
+        /app/share/framework-gui/frameworkgui/assets/devices/laptop-13-pro.png
       - install -Dm644 laptop-16.png
-        /app/share/framework-gui/assets/devices/laptop-16.png
+        /app/share/framework-gui/frameworkgui/assets/devices/laptop-16.png
       - install -Dm644 laptop-16-gpu.png
-        /app/share/framework-gui/assets/devices/laptop-16-gpu.png
+        /app/share/framework-gui/frameworkgui/assets/devices/laptop-16-gpu.png
       - install -Dm644 unknown.png
-        /app/share/framework-gui/assets/devices/unknown.png
+        /app/share/framework-gui/frameworkgui/assets/devices/unknown.png
       # The app icon, loaded at runtime for the window/taskbar mark.
       - install -Dm644 FrameworkGUI-16.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-16.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-16.png
       - install -Dm644 FrameworkGUI-32.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-32.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-32.png
       - install -Dm644 FrameworkGUI-48.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-48.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-48.png
       - install -Dm644 FrameworkGUI-64.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-64.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-64.png
       - install -Dm644 FrameworkGUI-128.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-128.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-128.png
       - install -Dm644 FrameworkGUI-256.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI-256.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI-256.png
       - install -Dm644 FrameworkGUI.png
-        /app/share/framework-gui/assets/icons/FrameworkGUI.png
+        /app/share/framework-gui/frameworkgui/assets/icons/FrameworkGUI.png
       - install -Dm755 framework-gui /app/bin/framework-gui
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.desktop
         /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
@@ -120,57 +127,65 @@ modules:
       - type: file
         path: ../framework_gui.py
       - type: file
-        path: ../app_icon.py
+        path: ../frameworkgui/__init__.py
       - type: file
-        path: ../appstate.py
+        path: ../frameworkgui/__main__.py
       - type: file
-        path: ../backdrop.py
+        path: ../frameworkgui/app.py
       - type: file
-        path: ../deps.py
+        path: ../frameworkgui/app_icon.py
       - type: file
-        path: ../device_images.py
+        path: ../frameworkgui/appstate.py
       - type: file
-        path: ../drivers.py
+        path: ../frameworkgui/backdrop.py
       - type: file
-        path: ../module_icons.py
+        path: ../frameworkgui/deps.py
       - type: file
-        path: ../navigation.py
+        path: ../frameworkgui/device_images.py
       - type: file
-        path: ../parsers.py
+        path: ../frameworkgui/drivers.py
       - type: file
-        path: ../power.py
+        path: ../frameworkgui/iconpaths.py
       - type: file
-        path: ../theme.py
+        path: ../frameworkgui/module_icons.py
       - type: file
-        path: ../widgets.py
+        path: ../frameworkgui/navigation.py
       - type: file
-        path: ../assets/devices/desktop.png
+        path: ../frameworkgui/parsers.py
       - type: file
-        path: ../assets/devices/laptop-12.png
+        path: ../frameworkgui/power.py
       - type: file
-        path: ../assets/devices/laptop-13.png
+        path: ../frameworkgui/theme.py
       - type: file
-        path: ../assets/devices/laptop-13-pro.png
+        path: ../frameworkgui/widgets.py
       - type: file
-        path: ../assets/devices/laptop-16.png
+        path: ../frameworkgui/assets/devices/desktop.png
       - type: file
-        path: ../assets/devices/laptop-16-gpu.png
+        path: ../frameworkgui/assets/devices/laptop-12.png
       - type: file
-        path: ../assets/devices/unknown.png
+        path: ../frameworkgui/assets/devices/laptop-13.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-16.png
+        path: ../frameworkgui/assets/devices/laptop-13-pro.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-32.png
+        path: ../frameworkgui/assets/devices/laptop-16.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-48.png
+        path: ../frameworkgui/assets/devices/laptop-16-gpu.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-64.png
+        path: ../frameworkgui/assets/devices/unknown.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-128.png
+        path: ../frameworkgui/assets/icons/FrameworkGUI-16.png
       - type: file
-        path: ../assets/icons/FrameworkGUI-256.png
+        path: ../frameworkgui/assets/icons/FrameworkGUI-32.png
       - type: file
-        path: ../assets/icons/FrameworkGUI.png
+        path: ../frameworkgui/assets/icons/FrameworkGUI-48.png
+      - type: file
+        path: ../frameworkgui/assets/icons/FrameworkGUI-64.png
+      - type: file
+        path: ../frameworkgui/assets/icons/FrameworkGUI-128.png
+      - type: file
+        path: ../frameworkgui/assets/icons/FrameworkGUI-256.png
+      - type: file
+        path: ../frameworkgui/assets/icons/FrameworkGUI.png
       - type: file
         path: ../LICENSE
       - type: file

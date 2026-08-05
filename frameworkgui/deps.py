@@ -5,7 +5,7 @@ The GUI only ever *runs* other programs — it has no direct hardware access —
 so "can I do X on this machine" reduces to "is the tool for X installed".
 This module is that registry: what each helper is for, how to detect it, and
 what installing it would actually run. It builds commands and URLs; it does
-not execute anything and does not import tkinter, so it is testable without
+not execute anything and does not import the toolkit, so it is testable without
 a display.
 
 Two rules the GUI depends on:

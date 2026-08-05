@@ -16,7 +16,7 @@ import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import deps  # noqa: E402
+from frameworkgui import deps  # noqa: E402
 
 
 class FakeResponse(io.BytesIO):

@@ -20,14 +20,12 @@ try {
     $Shortcut = Join-Path $GroupDir "Framework System GUI.lnk"
     $UninstLnk = Join-Path $GroupDir "Uninstall Framework System GUI.lnk"
     $RegKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrameworkGUI"
-    # All of these are required: framework_gui.py imports the rest, and a
-    # missing one only shows up as ModuleNotFoundError at launch.
-    $SrcFiles = @("framework_gui.py", "app_icon.py", "appstate.py",
-                  "backdrop.py", "deps.py", "device_images.py", "drivers.py",
-                  "module_icons.py", "navigation.py", "parsers.py",
-                  "power.py", "theme.py",
-                  "widgets.py") | ForEach-Object { Join-Path $Here "..\$_" }
-    $SrcAssets = Join-Path $Here "..\assets"
+    # The launcher, and the package it imports - which carries the app's
+    # assets too. This was a list of module filenames; copying the directory
+    # is what stops it falling behind the repo, since a module missing from
+    # the list only shows up as ModuleNotFoundError at launch.
+    $SrcFiles = @("framework_gui.py") | ForEach-Object { Join-Path $Here "..\$_" }
+    $SrcPackage = Join-Path $Here "..\frameworkgui"
 
     Write-Host "== Framework System GUI installer =="
     Write-Host "Source: $Here"
@@ -80,10 +78,17 @@ try {
         Copy-Item -LiteralPath (Resolve-Path $f) -Destination (Join-Path $AppDir $leaf) -Force
         Unblock-File -Path (Join-Path $AppDir $leaf) -ErrorAction SilentlyContinue
     }
-    if (-not (Test-Path $SrcAssets)) {
-        throw "assets\ not found - keep the folder structure from the repo intact."
+    if (-not (Test-Path $SrcPackage)) {
+        throw "frameworkgui\ not found - keep the folder structure from the repo intact."
     }
-    Copy-Item -LiteralPath $SrcAssets -Destination $AppDir -Recurse -Force
+    $DestPackage = Join-Path $AppDir "frameworkgui"
+    if (Test-Path $DestPackage) { Remove-Item -Recurse -Force $DestPackage }
+    Copy-Item -LiteralPath $SrcPackage -Destination $AppDir -Recurse -Force
+    # __pycache__ from the source machine is for whatever Python wrote it.
+    Get-ChildItem -Path $DestPackage -Filter "__pycache__" -Recurse -Directory `
+        -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+    Get-ChildItem -Path $DestPackage -Filter "*.py" -Recurse |
+        ForEach-Object { Unblock-File -Path $_.FullName -ErrorAction SilentlyContinue }
     Write-Host "Installed app to $AppDir"
 
     # 4) Ship the uninstaller with the install, not only on the share the
@@ -113,8 +118,8 @@ try {
     $lnk.WorkingDirectory = $AppDir
     $lnk.Description = "Control Framework laptop firmware settings"
     # Without this the shortcut shows pythonw.exe's icon. The .ico came
-    # across with the assets directory copied above.
-    $IconFile = Join-Path $AppDir "assets\icons\FrameworkGUI.ico"
+    # across inside the package copied above.
+    $IconFile = Join-Path $AppDir "frameworkgui\assets\icons\FrameworkGUI.ico"
     if (Test-Path $IconFile) { $lnk.IconLocation = "$IconFile,0" }
     $lnk.Save()
     $bytes = [IO.File]::ReadAllBytes($Shortcut)

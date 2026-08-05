@@ -4,7 +4,7 @@ The navigation model, and the declarative content of the gated panes.
 The redesigned app navigates with a 52px icon rail (five groups) and a 190px
 pane list (the sections inside the selected group). That structure, and
 everything the panes are gated on, is data — which keeps it testable without
-a display and keeps `framework_gui.py` to layout and plumbing.
+a display and keeps `app.py` to layout and plumbing.
 
 Rows here name a *key*; the UI maps the key to a method or a widget. That
 indirection is deliberate: a tool list holding bound methods could only be
@@ -17,53 +17,69 @@ the permissive default. Hiding a control that does apply is worse than
 showing one that does not.
 """
 
-# Rail icons are 18x18, 1.2px stroke, drawn from these SVG path commands so
-# the app carries no icon files and no icon dependency.
+# Rail icons are 18x18, 1.2px stroke, drawn from these path commands so the
+# app carries no icon files and no icon dependency.
 #
-# Every segment carries an explicit command letter. SVG's shorthands —
-# an implicit lineto ("M2.5 8 9 3") and a repeated arc without its letter —
-# are legal, but Qt's SVG parser is not uniformly willing to follow them:
-# on the Qt bundled with the packaged Windows build it drew the first
-# segment of such a path and dropped the rest, which is why four of these
-# five icons rendered as a bare diagonal stroke. The two that survived were
-# the two already written longhand. `tests/test_navigation.py` now rejects
-# the shorthands so this cannot come back.
+# They are drawn by `iconpaths.parse` + `widgets.icon_path`, not by Qt's SVG
+# renderer. That renderer dropped most of every path on the Qt bundled with
+# the packaged Windows build — four of these five icons came out as a bare
+# diagonal stroke on a real machine while rendering perfectly under the Qt
+# used in CI — and there is no way to test around a failure that only exists
+# in the shipped build. Parsing the paths ourselves removes the variable.
+#
+# Every segment still carries an explicit command letter, and
+# `tests/test_navigation.py` still checks that. It is a readability rule now
+# rather than a workaround: the parser handles SVG's implicit repeats
+# correctly, but an icon path is easier to edit when each command says what
+# it is.
 RAIL_GROUPS = (
     {
         "key": "overview",
         "label": "Overview",
-        "icon": "M2.5 8L9 3L15.5 8V14.5a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1z",
+        # A house: roof, then the body under it.
+        "icon": ("M2.6 8.4L9 3.1L15.4 8.4"
+                 "M4.7 9.9V15.1H13.3V9.9"),
         "items": (("Device", "overview"), ("Diagnostics", "tools")),
     },
     {
         "key": "hardware",
         "label": "Hardware",
-        "icon": "M3 5h12M3 9h12M3 13h12",
+        # Three sliders — three rails, each with its handle at a different
+        # position. A plain three-line stack read as a menu button.
+        "icon": ("M3 5.2H15M3 9H15M3 12.8H15"
+                 "M6.6 3.9V6.5M11.4 7.7V10.3M8.2 11.5V14.1"),
         "items": (("Fans", "fans"), ("Ports & modules", "ports"),
                   ("Settings", "settings")),
     },
     {
         "key": "power",
         "label": "Power",
-        "icon": "M10 2L5 10h3.5L8 16l5-8H9.5z",
+        # A bolt, closed so the outline joins cleanly at the top.
+        "icon": "M10.4 2.6L5.1 9.7H8.7L7.6 15.4L12.9 8.3H9.3Z",
         "items": (("CPU limits", "power"),),
     },
     {
         "key": "software",
         "label": "Software",
-        "icon": "M9 2v9M9 11L12.5 7.5M9 11L5.5 7.5M3 14h12",
+        # A download arrow onto a baseline.
+        "icon": ("M9 2.9V10.9M9 10.9L12.2 7.7M9 10.9L5.8 7.7"
+                 "M3.4 14.6H14.6"),
         "items": (("Drivers", "drivers"), ("Setup", "setup")),
     },
     {
         "key": "console",
         "label": "Console",
-        "icon": "M5 7.5L7 9.5L5 11.5M9 11.5h4",
+        # A terminal: window outline, prompt chevron, cursor line.
+        "icon": ("M2.7 3.9H15.3V14.1H2.7Z"
+                 "M5.6 7.4L7.7 9.4L5.6 11.4M9.5 11.5H12.7"),
         "items": (("Custom command", "console"),),
     },
 )
 
-# The appearance toggle pinned to the bottom of the rail.
-APPEARANCE_ICON = ("M9 3a6 6 0 0 0 0 12zM9 3a6 6 0 0 1 0 12", )
+# The appearance toggle pinned to the bottom of the rail: a contrast circle
+# — the outline, then the diameter that divides it.
+APPEARANCE_ICON = ("M9 3.2A5.8 5.8 0 0 0 9 14.8A5.8 5.8 0 0 0 9 3.2",
+                   "M9 3.2V14.8")
 
 SECTIONS = tuple(section for group in RAIL_GROUPS
                  for _label, section in group["items"])

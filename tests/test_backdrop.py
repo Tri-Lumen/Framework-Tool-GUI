@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import backdrop  # noqa: E402
+from frameworkgui import backdrop  # noqa: E402
 
 
 class TestWindowsBuild(unittest.TestCase):
@@ -34,11 +34,24 @@ class TestSupportsTranslucency(unittest.TestCase):
 
     def test_windows_11(self):
         self.assertTrue(backdrop.supports_translucency(
-            platform="win32", environ={}, windows_build=22621))
+            platform="win32", environ={}, windows_build=22621,
+            transparency_probe=lambda: True))
 
     def test_windows_10(self):
         self.assertFalse(backdrop.supports_translucency(
-            platform="win32", environ={}, windows_build=19045))
+            platform="win32", environ={}, windows_build=19045,
+            transparency_probe=lambda: True))
+
+    def test_windows_11_with_transparency_effects_off(self):
+        # DWM accepts DWMSBT_TRANSIENTWINDOW with the Settings toggle off
+        # and then draws a flat surface. Claiming acrylic there would be a
+        # status line that disagrees with the screen.
+        supported, reason = backdrop.translucency_state(
+            platform="win32", environ={}, windows_build=22621,
+            transparency_probe=lambda: False)
+        self.assertFalse(supported)
+        self.assertEqual(reason, backdrop.TRANSPARENCY_OFF)
+        self.assertIn("Settings", backdrop.unavailable_message(reason))
 
     def test_wayland_always_composites(self):
         self.assertTrue(backdrop.supports_translucency(
@@ -83,6 +96,19 @@ class TestStatusLabel(unittest.TestCase):
     def test_unavailable_message_is_not_empty(self):
         self.assertIn("opaque", backdrop.unavailable_message())
 
+    def test_every_reason_has_its_own_wording(self):
+        seen = set()
+        for reason in (backdrop.OLD_WINDOWS, backdrop.TRANSPARENCY_OFF,
+                       backdrop.NO_COMPOSITOR,
+                       backdrop.UNSUPPORTED_PLATFORM):
+            message = backdrop.unavailable_message(reason)
+            self.assertIn("opaque", message)
+            self.assertNotIn(message, seen)
+            seen.add(message)
+
+    def test_an_unknown_reason_still_says_something(self):
+        self.assertIn("opaque", backdrop.unavailable_message("nonsense"))
+
 
 class TestApplyBackdrop(unittest.TestCase):
 
@@ -100,6 +126,20 @@ class TestApplyBackdrop(unittest.TestCase):
         self.assertEqual(backdrop.DWMWA_SYSTEMBACKDROP_TYPE, 38)
         self.assertEqual(backdrop.DWMSBT_ACRYLIC, 3)
         self.assertEqual(backdrop.DWMSBT_NONE, 1)
+        self.assertEqual(backdrop.DWMWA_USE_IMMERSIVE_DARK_MODE, 20)
+        self.assertEqual(backdrop.DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, 19)
+
+    def test_acrylic_extends_the_frame_across_the_client_area(self):
+        # -1 on every edge. Without it DWM draws the backdrop behind the
+        # frame only, so the window looks as opaque as it did before while
+        # every call reports success — which is the shape the bug took.
+        self.assertEqual(backdrop._SHEET_OF_GLASS, (-1, -1, -1, -1))
+        self.assertEqual(backdrop._NO_GLASS, (0, 0, 0, 0))
+
+    def test_extending_the_frame_off_windows_declines(self):
+        if not sys.platform.startswith("win"):
+            self.assertFalse(backdrop._dwm_extend_frame(1234,
+                                                        (-1, -1, -1, -1)))
 
 
 if __name__ == "__main__":

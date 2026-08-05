@@ -20,7 +20,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from parsers import (  # noqa: E402
+from frameworkgui.parsers import (  # noqa: E402
     ac_connected,
     detect_model,
     parse_charge_limit,
@@ -30,8 +30,11 @@ from parsers import (  # noqa: E402
     parse_ports,
     parse_setting_value,
     parse_tool_version,
+    port_attached,
     port_is_live,
+    port_watts,
     sections,
+    short_firmware,
 )
 
 POWER_VV = """Charger Status
@@ -139,7 +142,7 @@ VERSIONS_GARBAGE = "some completely unrecognized output\nwith no Type: line\n"
 
 class TestPowerParsers(unittest.TestCase):
     def test_charger_and_battery_fields(self):
-        from parsers import (
+        from frameworkgui.parsers import (
             RE_AC,
             RE_CHG_A,
             RE_CHG_V,
@@ -159,7 +162,7 @@ class TestPowerParsers(unittest.TestCase):
         self.assertIn("connected", RE_AC.search(POWER_VV).group(1))
 
     def test_battery_health_math(self):
-        from parsers import RE_DESIGN, RE_LFCC
+        from frameworkgui.parsers import RE_DESIGN, RE_LFCC
         lfcc = int(RE_LFCC.search(POWER_VV).group(1))
         design = int(RE_DESIGN.search(POWER_VV).group(1))
         health = 100.0 * lfcc / design
@@ -168,14 +171,14 @@ class TestPowerParsers(unittest.TestCase):
 
 class TestThermalParser(unittest.TestCase):
     def test_temps_and_rpm(self):
-        from parsers import RE_RPM, RE_TEMP
+        from frameworkgui.parsers import RE_RPM, RE_TEMP
         temps = dict(RE_TEMP.findall(THERMAL))
         self.assertEqual(temps["APU"], "62")
         self.assertEqual(temps["F75303_CPU"], "44")
         self.assertEqual(RE_RPM.search(THERMAL).group(1), "7281")
 
     def test_zero_rpm_still_matches(self):
-        from parsers import RE_RPM
+        from frameworkgui.parsers import RE_RPM
         text = "  Fan Speed:       0 RPM\n"
         self.assertEqual(RE_RPM.search(text).group(1), "0")
 
@@ -461,6 +464,97 @@ class TestPortsChromebookFormat(unittest.TestCase):
     def test_port_is_live_tolerates_junk(self):
         self.assertFalse(port_is_live(None))
         self.assertFalse(port_is_live({}))
+        self.assertFalse(port_attached(None))
+        self.assertIsNone(port_watts({}))
+
+    def test_the_charging_type_is_kept(self):
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertEqual(ports[0]["charging"], "PD")
+        # "None" is not a charging type worth repeating.
+        self.assertNotIn("charging", ports[1])
+
+
+# The shape that broke the Overview on a real Laptop 13: the port the
+# machine was charging on reported its role and nothing else usable, and
+# every bay showed "disconnected · idle" while the AC card read 51.5 W.
+PDPORTS_SINK_WITHOUT_FIGURES = """USB-C Port 0 (Right Back):
+  Role:          Sink
+  Charging Type: PD
+  Voltage Now:   20.0 V, Max: 20.0 V
+  Current Lim:   0 mA, Max: 0 mA
+  Dual Role:     DRP
+  Max Power:     0.0 W
+USB-C Port 1 (Right Front):
+  Role:          Disconnected
+  Charging Type: None
+  Voltage Now:   0.0 V, Max: 0.0 V
+  Current Lim:   0 mA, Max: 0 mA
+"""
+
+
+class TestAttachedWithoutFigures(unittest.TestCase):
+    """A port can be in use and still report no usable wattage.
+
+    The role is the only reliable statement either command makes about
+    whether something is plugged in, so it — not a derived wattage — is
+    what decides. Asking for watts first reported the port the machine was
+    running on as idle.
+    """
+
+    def setUp(self):
+        self.ports = parse_ports(PDPORTS_SINK_WITHOUT_FIGURES)
+
+    def test_a_sink_with_no_current_is_still_attached(self):
+        self.assertTrue(port_attached(self.ports[0]))
+        self.assertFalse(port_is_live(self.ports[0]))
+
+    def test_the_voltage_survives_on_its_own(self):
+        # Voltage and current used to be taken as a pair, so a port with
+        # one and not the other came back with neither.
+        self.assertEqual(self.ports[0]["volts"], 20.0)
+        self.assertEqual(self.ports[0]["ma"], 0)
+        self.assertNotIn("watts", self.ports[0])
+
+    def test_no_wattage_is_reported_rather_than_zero(self):
+        self.assertIsNone(port_watts(self.ports[0]))
+
+    def test_a_disconnected_port_is_still_disconnected(self):
+        # The fail-open direction has a limit: a voltage rail on an empty
+        # port must not read as something plugged in.
+        self.assertFalse(port_attached(self.ports[1]))
+        self.assertIsNone(port_watts(self.ports[1]))
+
+    def test_a_role_of_none_reads_as_idle(self):
+        self.assertFalse(port_attached({"role": "None"}))
+        self.assertFalse(port_attached({"role": "", "watts": 60.0}))
+
+    def test_an_unrecognised_role_is_treated_as_attached(self):
+        # Fail open: a firmware that invents a connected state should not
+        # make the bay disappear.
+        self.assertTrue(port_attached({"role": "SinkStandby"}))
+
+
+class TestShortFirmware(unittest.TestCase):
+    """An EC version string is mostly provenance, and it does not fit."""
+
+    FULL = ("azalea_v3.4.113405-ec:e0a4f2,os:7b88e1,cmsis:4aa3ff "
+            "2026-05-20 05:29:08 marigold1@ip-172-26-3-226")
+
+    def test_the_version_survives_and_the_rest_does_not(self):
+        self.assertEqual(short_firmware(self.FULL), "azalea_v3.4.113405")
+
+    def test_a_short_version_is_left_alone(self):
+        self.assertEqual(short_firmware("3.03"), "3.03")
+        self.assertEqual(short_firmware("hx30 0.1.4"), "hx30")
+
+    def test_anything_still_too_long_is_cut_not_dropped(self):
+        value = "a" * 60
+        self.assertEqual(len(short_firmware(value)), 28)
+        self.assertTrue(short_firmware(value).endswith("…"))
+
+    def test_nothing_to_shorten(self):
+        for value in ("", None, "   "):
+            self.assertEqual(short_firmware(value), "")
 
 
 class TestChargeLimit(unittest.TestCase):

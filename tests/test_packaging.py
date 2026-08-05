@@ -1,16 +1,20 @@
 """Packaging checks — cheap guards against shipping a broken build.
 
-The app is more than one file: framework_gui.py imports parsers.py. Every
+The app is a package of fourteen modules plus its assets, and every
 packaging path (PyInstaller build, script install, Flatpak manifest) has to
-carry both, and a miss doesn't show up until the app launches on a target
+carry all of it. A miss doesn't show up until the app launches on a target
 machine and dies with ModuleNotFoundError. These tests are the stand-in for
 the Windows/Flatpak builds that CI can't fully exercise; they need no
-display, no tkinter, and no build tooling.
+display, no toolkit, and no build tooling.
 
-If you add another module at the repo root, these fail until every
-packaging path knows about it — that's the point.
+The package is what makes this tractable: a path that copies the
+`frameworkgui/` directory carries a new module automatically, so these
+tests check that each path takes the directory rather than listing files —
+which is what they used to have to do, and what fell behind the repo every
+time a module was added.
 """
 
+import ast
 import os
 import sys
 import unittest
@@ -18,12 +22,17 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-import app_icon  # noqa: E402
+from frameworkgui import app_icon  # noqa: E402
+
+# The package the whole app lives in, and the launcher every packaging path
+# points at.
+PACKAGE = "frameworkgui"
+LAUNCHER = "framework_gui.py"
 
 # Modules that make up the app itself (tests/ and tooling excluded).
 APP_MODULES = sorted(
-    f for f in os.listdir(REPO)
-    if f.endswith(".py") and not f.startswith("test_")
+    f for f in os.listdir(os.path.join(REPO, PACKAGE))
+    if f.endswith(".py")
 )
 
 
@@ -37,10 +46,25 @@ class TestAppModules(unittest.TestCase):
     def test_expected_modules_present(self):
         # A sanity anchor: if this changes, the rest of the file needs a look.
         self.assertEqual(APP_MODULES, [
-            "app_icon.py", "appstate.py", "backdrop.py", "deps.py",
-            "device_images.py", "drivers.py", "framework_gui.py",
-            "module_icons.py", "navigation.py", "parsers.py", "power.py",
-            "theme.py", "widgets.py"])
+            "__init__.py", "__main__.py", "app.py", "app_icon.py",
+            "appstate.py", "backdrop.py", "deps.py", "device_images.py",
+            "drivers.py", "iconpaths.py", "module_icons.py", "navigation.py",
+            "parsers.py", "power.py", "theme.py", "widgets.py"])
+
+    def test_the_launcher_is_the_only_python_file_at_the_root(self):
+        """One entry point, and the app itself in the package beside it.
+
+        Every packaging path names this file, so it staying put is what
+        keeps PyInstaller, Inno Setup, the script installers and the
+        Flatpak launcher all pointing at the same thing.
+        """
+        at_root = sorted(f for f in os.listdir(REPO) if f.endswith(".py"))
+        self.assertEqual(at_root, [LAUNCHER])
+        self.assertIn("from frameworkgui.app import main", read(LAUNCHER))
+
+    def test_the_package_can_be_run_as_a_module(self):
+        self.assertIn("from .app import main",
+                      read(PACKAGE, "__main__.py"))
 
     def test_only_the_ui_layer_imports_the_toolkit(self):
         """The logic modules stay testable without a display.
@@ -50,12 +74,21 @@ class TestAppModules(unittest.TestCase):
         Qt platform plugin. An import of PySide6 in any of them would take
         that away, and it is an easy thing to add by accident.
         """
-        ui_layer = {"framework_gui.py", "widgets.py"}
+        ui_layer = {"app.py", "widgets.py", "__main__.py"}
         for mod in APP_MODULES:
             if mod in ui_layer:
                 continue
-            self.assertNotIn(
-                "PySide6", read(mod),
+            # The imports, not the text: a module is free to *mention*
+            # PySide6 in a comment explaining why it does not import it.
+            tree = ast.parse(read(PACKAGE, mod))
+            imported = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imported.add(node.module or "")
+            self.assertFalse(
+                [name for name in imported if name.startswith("PySide6")],
                 f"{mod} imports the UI toolkit — keep it display-free")
 
 
@@ -67,7 +100,8 @@ class TestAssets(unittest.TestCase):
     slot on the home screen.
     """
 
-    ASSETS = sorted(os.listdir(os.path.join(REPO, "assets", "devices")))
+    ASSETS = sorted(os.listdir(os.path.join(REPO, PACKAGE, "assets",
+                                            "devices")))
 
     def test_assets_exist(self):
         self.assertTrue(self.ASSETS, "no device images in assets/devices")
@@ -88,26 +122,32 @@ class TestAssets(unittest.TestCase):
                 f"install -Dm644 {name}", manifest,
                 f"Flatpak manifest has no install command for {name}")
             self.assertIn(
-                f"path: ../assets/devices/{name}", manifest,
+                f"path: ../{PACKAGE}/assets/devices/{name}", manifest,
                 f"Flatpak manifest does not list {name} as a source")
 
 
 class TestWindowsPackaging(unittest.TestCase):
+    """Both Windows paths have to carry the package, not a list of files.
 
-    def test_build_bat_copies_every_module(self):
+    The list is what used to fall behind: adding a module meant editing
+    three packaging scripts, and forgetting one produced an exe that died
+    with ModuleNotFoundError on a machine that had never seen the source.
+    """
+
+    def test_build_bat_copies_the_package_and_the_launcher(self):
         build = read("windows", "build.bat")
-        for mod in APP_MODULES:
-            self.assertIn(
-                mod, build,
-                f"windows/build.bat does not copy {mod} into the PyInstaller "
-                f"work dir — the exe would fail to import it")
+        self.assertIn(PACKAGE, build,
+                      "windows/build.bat does not copy the app package into "
+                      "the PyInstaller work dir — the exe could not import it")
+        self.assertIn(LAUNCHER, build,
+                      "windows/build.bat does not name the entry script")
 
-    def test_install_ps1_copies_every_module(self):
+    def test_install_ps1_copies_the_package_and_the_launcher(self):
         install = read("windows", "install.ps1")
-        for mod in APP_MODULES:
-            self.assertIn(
-                mod, install,
-                f"windows/install.ps1 does not install {mod}")
+        self.assertIn(PACKAGE, install,
+                      "windows/install.ps1 does not install the app package")
+        self.assertIn(LAUNCHER, install,
+                      "windows/install.ps1 does not install the launcher")
 
 
 class TestFlatpakPackaging(unittest.TestCase):
@@ -115,14 +155,29 @@ class TestFlatpakPackaging(unittest.TestCase):
     MANIFEST = os.path.join("flatpak", "io.github.frameworkgui.FrameworkGUI.yml")
 
     def test_manifest_installs_every_module(self):
+        """Each module by name, because YAML sources cannot take a directory.
+
+        flatpak-builder's `file` source type is one file; a `dir` source
+        would copy the checkout wholesale. So this manifest is the one
+        packaging path that still lists modules, and this test is what keeps
+        the list current.
+        """
         manifest = read(self.MANIFEST)
         for mod in APP_MODULES:
             self.assertIn(
-                f"install -Dm644 {mod} /app/share/framework-gui/{mod}", manifest,
+                f"install -Dm644 {mod} "
+                f"/app/share/framework-gui/{PACKAGE}/{mod}", manifest,
                 f"Flatpak manifest has no install command for {mod}")
             self.assertIn(
-                f"path: ../{mod}", manifest,
+                f"path: ../{PACKAGE}/{mod}", manifest,
                 f"Flatpak manifest does not list {mod} as a source")
+
+    def test_manifest_installs_the_launcher(self):
+        manifest = read(self.MANIFEST)
+        self.assertIn(
+            f"install -Dm644 {LAUNCHER} /app/share/framework-gui/{LAUNCHER}",
+            manifest)
+        self.assertIn(f"path: ../{LAUNCHER}", manifest)
 
     def test_manifest_installs_the_toolkit(self):
         """The Flatpak has to carry PySide6; the runtime has no Python Qt.
@@ -310,13 +365,14 @@ class TestAppIcon(unittest.TestCase):
     fails loudly when a build forgets it.
     """
 
-    ICON_DIR = os.path.join(REPO, "assets", "icons")
+    ICON_DIR = os.path.join(REPO, PACKAGE, "assets", "icons")
 
     def test_every_named_icon_file_is_shipped(self):
         for name in app_icon.FILES:
             self.assertTrue(
                 os.path.isfile(os.path.join(self.ICON_DIR, name)),
-                f"app_icon names {name} but assets/icons does not have it")
+                f"app_icon names {name} but the package\'s assets/icons "
+                f"does not have it")
 
     def test_the_windows_icon_is_a_real_ico(self):
         with open(os.path.join(self.ICON_DIR, app_icon.ICO), "rb") as fh:
@@ -362,7 +418,7 @@ class TestAppIcon(unittest.TestCase):
     def test_the_flatpak_ships_the_icons_for_the_app_to_load(self):
         manifest = read(TestFlatpakPackaging.MANIFEST)
         for name in app_icon.PNG_SIZED:
-            self.assertIn(f"path: ../assets/icons/{name}", manifest,
+            self.assertIn(f"path: ../{PACKAGE}/assets/icons/{name}", manifest,
                           f"Flatpak manifest does not list {name} as a source")
 
     def test_the_placeholder_svg_is_gone(self):

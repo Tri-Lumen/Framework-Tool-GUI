@@ -2,7 +2,7 @@
 The reusable pieces of the redesigned UI.
 
 Everything here is generic: a card, a panel, a bar, a badge, a rail button.
-None of it knows what a fan or a charge limit is — `framework_gui.py` builds
+None of it knows what a fan or a charge limit is — `app.py` builds
 the panes out of these. Colours come from `theme` by token name; there is no
 colour literal in this file, which is what keeps the two appearances honest.
 
@@ -15,8 +15,7 @@ paint themselves; everything else is styled by the sheet and carries only a
 import time
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
@@ -28,27 +27,50 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import device_images
-import module_icons
-import theme
+from . import device_images, iconpaths, module_icons, theme
 
-_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
-    'viewBox="0 0 18 18" fill="none" stroke="{colour}" stroke-width="1.2" '
-    'stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
-)
+# Every icon is drawn in this box and scaled from it.
+ICON_BOX = 18.0
+ICON_STROKE = 1.2
+
+
+def icon_path(path_d):
+    """One or more path strings as a single QPainterPath in the 18x18 box.
+
+    The path language is parsed by `iconpaths`, not by Qt: QSvgRenderer
+    dropped most of every path on the Qt in the packaged Windows build,
+    which is what made four of the five rail icons render as a bare
+    diagonal stroke on a real machine. See that module's docstring.
+    """
+    painter_path = QPainterPath()
+    for one in _as_paths(path_d):
+        for op in iconpaths.parse(one):
+            if op[0] == "move":
+                painter_path.moveTo(op[1], op[2])
+            elif op[0] == "line":
+                painter_path.lineTo(op[1], op[2])
+            elif op[0] == "cubic":
+                painter_path.cubicTo(*op[1:])
+            else:
+                painter_path.closeSubpath()
+    return painter_path
 
 
 def stroke_pixmap(path_d, colour, size=18, ratio=1.0):
-    """Render one stroked SVG path into a pixmap at the given colour."""
-    body = "".join('<path d="{}"/>'.format(d) for d in _as_paths(path_d))
-    svg = _SVG.format(size=size, colour=colour, body=body).encode("utf-8")
-    pixmap = QPixmap(int(size * ratio), int(size * ratio))
+    """Render one stroked icon path into a pixmap at the given colour."""
+    pixmap = QPixmap(max(int(round(size * ratio)), 1),
+                     max(int(round(size * ratio)), 1))
     pixmap.setDevicePixelRatio(ratio)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
-    QSvgRenderer(svg).render(painter)
+    painter.scale(size / ICON_BOX, size / ICON_BOX)
+    pen = QPen(QColor(colour), ICON_STROKE)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPath(icon_path(path_d))
     painter.end()
     return pixmap
 

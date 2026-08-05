@@ -59,8 +59,8 @@ if STUB_SUPPORTED:
 CAN_RUN = QT_AVAILABLE and STUB_SUPPORTED
 
 if CAN_RUN:
-    import framework_gui as fg  # noqa: E402
-    import navigation  # noqa: E402
+    from frameworkgui import app as fg  # noqa: E402
+    from frameworkgui import navigation  # noqa: E402,I001
 
 
 def make_stub_binary(tmpdir, versions_output):

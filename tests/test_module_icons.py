@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import module_icons  # noqa: E402
+from frameworkgui import module_icons  # noqa: E402
 
 
 class TestIcons(unittest.TestCase):

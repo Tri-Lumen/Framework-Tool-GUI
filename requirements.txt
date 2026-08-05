@@ -1,11 +1,13 @@
 # The UI toolkit, and the only third-party dependency the app has.
 #
-# PySide6-Essentials rather than PySide6: the app uses QtWidgets, QtGui,
-# QtCore and QtSvg. The full distribution adds WebEngine, 3D, Charts,
+# PySide6-Essentials rather than PySide6: the app uses QtWidgets, QtGui and
+# QtCore. (Not QtSvg — icon paths are parsed by iconpaths.py and drawn with
+# QPainter, because Qt's SVG renderer dropped most of every icon path in the
+# packaged Windows build.) The full distribution adds WebEngine, 3D, Charts,
 # Multimedia and more, which would roughly triple both the download and the
 # packaged exe for nothing.
 #
 # Everything else — parsers, power, deps, drivers, navigation, theme,
-# appstate, backdrop, device_images, module_icons — is standard library
+# appstate, backdrop, device_images, iconpaths, module_icons — is standard library
 # only, and their tests need neither this nor a display.
 PySide6-Essentials>=6.6
