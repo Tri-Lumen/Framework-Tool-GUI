@@ -43,21 +43,26 @@ when that command finishes.
 ## Quick orientation
 
 ```
-framework_gui.py      Qt app — layout, command execution, the 14 diagnostics.
+framework_gui.py      Qt app — layout, command execution, the 12 diagnostics.
                         One of only two modules that import PySide6.
-widgets.py             Reusable UI pieces: Panel, Card, Bar, Badge, RailButton,
-                        PaneItem, Segmented, Grabber, ChassisDiagram,
+widgets.py             Reusable UI pieces: Panel, Card, Bar, TimedBar, Badge,
+                        RailButton, PaneItem, Segmented, Grabber, ChassisDiagram,
                         ModuleIcon, MetricPanel, SensorRow, ImageSlot,
                         Spinner. No colour literals — tokens by name only.
 theme.py               Design tokens + the Qt style sheet rendered from them.
                         No toolkit import: the sheet is a string.
 navigation.py          Rail groups, pane items, and the declarative content of
-                        every gated pane (14 tools, 9 port queries, 9 settings
-                        rows). Keys, not bound methods, so it stays testable.
+                        every gated pane (12 tools, 9 port queries, 9 settings
+                        rows, 2 charge presets). Keys, not bound methods, so
+                        it stays testable.
 appstate.py            The two persisted UI choices (appearance, drawer height).
 backdrop.py            Compositing probe + the Windows 11 backdrop call.
-device_images.py       Board string → product photograph. Filenames only.
+device_images.py       Board string → product photograph, and the chassis
+                        dimensions/bay count the Overview drawing is scaled
+                        from. Filenames and numbers only.
 module_icons.py        Expansion-card SVG paths + the module classifier.
+app_icon.py            The app icon's filenames and where each packaging path
+                        finds them. Stdlib only, like device_images.
 parsers.py             Pure-Python: regex parsers + detect_model(). No toolkit
                         import, so it's unit-testable without a display.
 power.py               CPU power-limit (TDP) backends — ryzenadj / RAPL /
@@ -68,10 +73,17 @@ drivers.py             Framework download-page catalog. Links only, no I/O.
                         follows parsers.py's rules: stdlib only, no toolkit
                         import, I/O injected as arguments)
 assets/devices/        One product photograph per chassis, for the Overview.
+assets/icons/          The Framework mark: a multi-resolution .ico for Windows
+                        and PNGs for the window icon and the Flatpak theme.
 tests/test_parsers.py  Unit tests for parsers.py. Run anywhere, no display needed.
 tests/test_power.py    Unit tests for power.py — unit conversions especially.
 tests/test_deps.py     Unit tests for deps.py — every install plan path.
 tests/test_drivers.py  Unit tests for drivers.py — board matching + catalog.
+tests/test_commands.py Every flag the app can issue, checked against
+                        framework_tool's published interface, plus the fixed
+                        value sets for the enum-valued ones. A typo in an
+                        argument is a button that fails and looks like a
+                        hardware fault; nothing else catches it.
 tests/test_theme.py    Token table + style sheet: both appearances complete,
                         no unrendered placeholder, every colour paintable.
 tests/test_navigation.py  The gating table, without a display — the same
@@ -221,6 +233,69 @@ failure mode to watch for.
   beyond `path_for()`; a build shipped without the images falls back to the
   text slot in `widgets.ImageSlot` rather than showing a blank rectangle.
 
+- **Icon paths spell every command out.** SVG lets a path imply a lineto
+  (`M2.5 8 9 3`) and lets an arc repeat without its letter. Both are legal
+  and neither is reliably parsed by the Qt in the packaged Windows build —
+  it drew the first segment and dropped the rest, which is why four of five
+  rail icons rendered as a bare diagonal stroke on a real machine while the
+  two written longhand were fine. `tests/test_navigation.TestIconPaths`
+  counts the arguments after each command letter and fails on a shorthand,
+  and `tests/test_module_icons` runs the same check over the module marks.
+  Nothing warns you about this: the paths are strings, they render correctly
+  under the Qt used in CI, and the failure only appears in the shipped build.
+
+- **Ports are read through two commands, not one.** `--pdports` uses a
+  Framework-specific EC command (`0x3E23`) that not every EC firmware
+  implements. Where it is missing the CLI *still exits 0*, having printed
+  only errors — so the app saw a successful command, parsed zero ports, and
+  left every bay reading "not read" with no clue why. `--pdports-chromebook`
+  asks the same question through the generic Chromium EC path and answers
+  on boards the first does not. It prints a different format
+  (`USB-C Port 0 (Right Back):`, `Role:`, `Voltage Now`/`Current Lim`
+  instead of `Negotiated:`), so `parse_ports` reads both and
+  `readings["ports_source"]` records which one answered. Keep the fallback:
+  it is the difference between the bay panel working and not.
+
+- **A reading command logs its output.** The Overview scan used to run four
+  commands silently, so the drawer showed four bare `$` lines and a failed
+  reading was indistinguishable from a parse that returned nothing. Every
+  command in the app echoes its output now; `_read_into` is the one place
+  that does it for the scan.
+
+- **DP/HDMI and Audio cards are identified but not located.** Upstream says
+  so outright: the HID API it goes through abstracts away the USB topology,
+  "so we can't figure out which port the card is connected to". They are
+  listed under the bays as present on the machine rather than dropped into a
+  row, because putting one in a particular bay would be a guess — the same
+  rule that gives an unidentified bay the neutral mark.
+
+- **The chassis drawing is the detected machine.** It was one fixed 300x112
+  rectangle with four bays at hard-coded coordinates for every model.
+  `device_images.CHASSIS` carries each chassis's published width/depth in
+  millimetres and its expansion-bay count, and `widgets.ChassisDiagram`
+  scales from those. Use **one** scale for every model
+  (`ChassisDiagram.pixels_per_mm`): fitting each one to the box
+  independently makes them all come out the same size, because the Framework
+  laptops have nearly identical width:depth ratios and differ mainly in
+  absolute size. Shape it at build time, not only when readings arrive — the
+  sensor read needs elevation and may never happen.
+
+- **A timed tool draws a bar; a stepped one draws cells.** `navigation.MODE_BAR`
+  is for a tool whose length is known before it starts (a 30 s burst, six
+  samples five seconds apart) and gets one animated `TimedBar` driven by the
+  clock on the UI side. `MODE_STEPS` is for a sequence whose steps each take
+  as long as they take — the full system report, where "4 of 6" is the only
+  honest progress there is. The numbers that used to be hard-coded in each
+  tool body are `params`, editable next to Run, read at Run and frozen into
+  `_tool_values` so no worker thread ever reaches into a widget.
+
+- **Check `_busy` before touching any UI.** `run_tool` refuses while a tool
+  is running, but a caller that marks a row running, shows the detail panel
+  and starts the spinner *first* strands all of it when `run_tool` then
+  returns without starting a thread — nothing emits `sig_tool_done`, so the
+  row stays lit and the bar animates for the rest of the session. Guard at
+  the top of the handler. `tests/test_smoke_gui.TestBusyGuard` covers it.
+
 - **Expansion-card marks are drawn, not shipped.** `module_icons.py` holds
   an 18×18 stroke path per module type, in the same idiom as the rail icons,
   so they tint to the port's state and stay sharp at any scale with no image
@@ -232,6 +307,34 @@ failure mode to watch for.
   `readings["module_hints"]` is the seam where real per-bay identification
   plugs in if the CLI ever reports it; until then an unidentified bay gets
   the neutral mark, not a plausible guess.
+
+- **A setting lives on the pane it changes.** The charge presets were
+  Diagnostics entries, so running one rewrote two Settings rows from a
+  different section with no sign there that anything had moved. They are
+  `navigation.SETTINGS_PRESETS` now, rendered above the rows they set.
+
+- **Read a setting with the reader its row names.** framework_tool prints
+  more than one number in some of these blocks and the generic reader took
+  the wrong one: `--charge-limit` prints "Minimum 0%, Maximum 80%" and the
+  first percentage won, so every machine reported a 0% limit; both
+  fingerprint reads print a level *and* a percentage under one heading, and
+  the percentage was handed to a combo box with no such entry, so the level
+  never filled in at all. `SETTINGS_ROWS["parse"]` names the reader,
+  `App.SETTING_PARSERS` maps it.
+
+- **Ask whether there is AC before reporting AC watts.** The charger voltage
+  and input current are printed whether or not an adapter is attached and
+  are not zero on battery, so multiplying them unconditionally showed a few
+  watts of phantom draw on an unplugged machine. `parsers.ac_connected`
+  decides first; None means "it did not say", which is not the same as
+  "there is no adapter".
+
+- **An Auto button only where there is an auto.** Rows whose setting has a
+  real automatic mode get one (`SETTINGS_ROWS["auto"]`); the two fingerprint
+  rows share `--fp-led-level auto`, because `--fp-brightness` has no auto of
+  its own and that is what releases both. A row whose setting genuinely has
+  none — the keyboard backlight — gets no button rather than one that
+  silently does nothing.
 
 - **Danger styling is a rule, not a decoration.** Every destructive or
   hardware-risky control gets the danger colours *at the control*, plus a
@@ -266,7 +369,16 @@ failure mode to watch for.
     though it caps *frequency* rather than wattage — it needs nothing
     installed, so it's the honest fallback, and `sets_watts: False` is what
     stops the UI from labelling it as watts.
-  - `deps.py` never returns "nothing I can do". Every dependency yields an
+  - `deps.py` never returns "nothing I can do". **Name the binary you want**
+    in a `KIND_DOWNLOAD` entry: `asset_match` alone is ambiguous, and the
+    RyzenAdj release ships both `ryzenadj-win64.zip` (the CLI) and
+    `libryzenadj-win64.zip` (the library — DLL, .lib and header, no
+    executable). Matching on `win64` and taking the first hit downloaded the
+    library, so the install "succeeded" and then reported ryzenadj.exe
+    missing. `pick_asset` scores on the binary's name and penalises
+    lib/debug/src builds. Unpacking then deletes the archive (`deps.cleanup`)
+    — archives only: the DLLs beside ryzenadj.exe are what let it reach the
+    SoC, so tidying the unpacked tree would break the tool just installed. Every dependency yields an
     install plan; where no package exists (RyzenAdj outside the AUR) the
     plan degrades to `KIND_MANUAL` with upstream's page. Emitting an
     `apt-get install ryzenadj` that cannot work would be worse than saying
@@ -407,6 +519,12 @@ failure mode to watch for.
   a real Framework device, that's the highest-value next step: run each
   diagnostic and each Ports & modules query and diff actual output against
   the samples in `tests/test_parsers.py`.
+  One round of that has now happened, from a user's screenshot on a Laptop
+  13 AMD (EC `azalea_v3.4`), and it found three real mismatches: `--pdports`
+  named no ports at all on that EC (hence the `--pdports-chromebook`
+  fallback), `--charge-limit`'s two percentages were read in the wrong
+  order, and the AC card multiplied charger registers that are non-zero on
+  battery. Assume there are more.
 - **The whole app has only ever run under Xvfb and Qt's offscreen
   platform.** The layout was checked by screenshotting all nine sections at
   the design's 1180x780 and comparing them to the handoff's captures, which
@@ -479,8 +597,14 @@ failure mode to watch for.
   confirming all twelve in a real browser matters more than it used to.
 - **The persistence links on the CPU limits pane have not been opened
   either.** Same caveat, smaller blast radius: a dead one costs a user a search.
-- The Flatpak app icon (`io.github.frameworkgui.FrameworkGUI.svg`) is a
-  crude placeholder, not real artwork.
+- **The app icon is real artwork now but has never been seen in place.**
+  `assets/icons/` carries the Framework mark as a nine-size `.ico` and as
+  PNGs; the exe, the Inno installer, the Start Menu shortcut, the Qt window
+  icon and the Flatpak's hicolor theme all point at it, and the placeholder
+  SVG is gone. None of that has been looked at on a real desktop. One thing
+  to check first: the mark is near-black (#1f1f1f) on transparency, which is
+  low contrast on a dark Windows taskbar — if it disappears there, the fix
+  is a light or outlined variant, not a code change.
 
 ## Deliberately out of scope
 
@@ -554,4 +678,10 @@ especially the Flatpak job, which had never been run when it was written.
    and `powercfg` on Windows.
 10. Open all twelve Knowledge Base URLs in `drivers.py` in a browser and
     confirm each still resolves — they are the whole Drivers pane now.
-11. Real app icon for the Flatpak `.desktop`/icon file, and a Windows `.ico`.
+11. Confirm the app icon reads on a dark Windows taskbar and in a Linux
+    shell's app grid — it is near-black on transparency, which is the one
+    thing about it that might need a lighter variant.
+12. Re-check the port reading on an EC that *does* implement `--pdports`.
+    The two-command fallback is exercised only against a stub; a board where
+    the first command answers should still take the first path, and
+    `readings["ports_source"]` on the Overview says which one ran.

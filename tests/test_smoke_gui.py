@@ -105,6 +105,30 @@ def labels_in(widget):
     return [le.text() for le in widget.findChildren(QLabel) if le.text()]
 
 
+def settle(app, window, timeout_ms=DETECT_TIMEOUT_MS):
+    """Spin the event loop until the launch device scan has reported back.
+
+    Tests that build an App directly need this for the same reason
+    `_drive_app` waits: App.__init__ schedules a scan on a background
+    thread, and tearing the window down while that thread is still going to
+    emit into it is a race, not a clean exit.
+    """
+    deadline = QTimer()
+    deadline.setSingleShot(True)
+    deadline.timeout.connect(app.quit)
+    deadline.start(timeout_ms)
+
+    def watcher():
+        if window.caps.get("model") != "Detecting…" and not window._busy:
+            app.quit()
+        else:
+            QTimer.singleShot(25, watcher)
+
+    QTimer.singleShot(25, watcher)
+    app.exec()
+    deadline.stop()
+
+
 def _drive_app(timeout_ms):
     """Run a real App through a real event loop until the device scan has
     settled, then snapshot caps and the controls on each section.
@@ -212,7 +236,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertTrue(caps["is_laptop12"])
         self.assertTrue(caps["has_touchscreen"])
         self.assertTrue(caps["has_stylus"])
-        self.assertEqual(len(r["tool_keys"]), 14)
+        self.assertEqual(len(r["tool_keys"]), 12)
         self.assertIn("input_power", r["tool_keys"])
         self.assertIn("tablet_mode", r["settings_keys"])
         self.assertIn("touchscreen", r["settings_keys"])
@@ -225,7 +249,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertFalse(caps["has_stylus"])
         self.assertIn("expansion_bay", r["port_keys"])
         self.assertNotIn("stylus", r["port_keys"])
-        self.assertEqual(len(r["tool_keys"]), 14)  # is_laptop: nothing hidden
+        self.assertEqual(len(r["tool_keys"]), 12)  # is_laptop: nothing hidden
 
     def test_desktop_hides_battery_tools_shows_rgb(self):
         r = run_app_and_capture(VERSIONS_DESKTOP)
@@ -233,8 +257,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertFalse(caps["is_laptop"])
         self.assertTrue(caps["has_rgbkbd"])
         for key in ("input_power", "battery_health", "charge_speed",
-                    "kblight_sweep", "fpled_cycle", "preset_longevity",
-                    "preset_full"):
+                    "kblight_sweep", "fpled_cycle"):
             self.assertNotIn(key, r["tool_keys"])
         self.assertEqual(len(r["tool_keys"]), 7)
         self.assertNotIn("expansion_bay", r["port_keys"])
@@ -325,7 +348,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertTrue(caps["has_touchscreen"])
         self.assertTrue(caps["has_stylus"])
         self.assertTrue(caps["has_expansion_bay"])
-        self.assertEqual(len(r["tool_keys"]), 14)
+        self.assertEqual(len(r["tool_keys"]), 12)
         self.assertEqual(len(r["port_keys"]), 9)
 
 
@@ -414,3 +437,112 @@ class TestNavigationWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(CAN_RUN,
+                     "PySide6 unavailable or no Qt platform plugin")
+class TestBusyGuard(unittest.TestCase):
+    """Starting a tool while one is running must leave no UI stranded.
+
+    `run_tool` refuses while busy, but `_start_tool` used to do its work
+    first: it marked the row as running, showed the detail panel and started
+    the spinner and the progress bar, *then* called `run_tool`, which
+    returned without starting a thread. Nothing then emitted sig_tool_done,
+    so the row stayed lit and the bar kept animating for the rest of the
+    session. Clicking Run on a second tool was all it took.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        settle(self.app, self.window)
+
+    def tearDown(self):
+        # These tests set _busy by hand to simulate a running tool and no
+        # worker ever clears it, so release it before settling or the wait
+        # below just burns its whole timeout.
+        self.window._busy = False
+        # Let the launch scan finish before the window goes. A detect thread
+        # that reports into a deleted window is CLAUDE.md gotcha #6, and it
+        # shows up as an intermittent signal-arity TypeError rather than as
+        # a failure, which is worse than a plain crash.
+        settle(self.app, self.window)
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def tool(self, key):
+        return next(t for t in navigation.TOOLS if t["key"] == key)
+
+    def test_a_second_tool_does_not_strand_the_row(self):
+        window = self.window
+        window._busy = True                      # pretend one is running
+        burst = self.tool("fan_burst")
+        window._start_tool(burst)
+        frame = window.tool_rows.get(burst["key"])
+        if frame is not None:
+            self.assertNotEqual(frame.property("running"), "true",
+                                "row was marked running with no worker")
+        self.assertIsNone(getattr(window, "_current_tool", None))
+
+    def test_a_second_tool_does_not_start_the_progress_bar(self):
+        window = self.window
+        window._busy = True
+        window._start_tool(self.tool("fan_burst"))
+        self.assertFalse(window.tool_detail.bar._timer.isActive(),
+                         "the progress bar is animating with no tool running")
+        self.assertFalse(window.tool_detail._clock.isActive())
+
+    def test_a_preset_does_not_fill_rows_it_did_not_write(self):
+        window = self.window
+        if "charge_limit" not in window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+        before = window._editor_value("charge_limit")
+        window._busy = True
+        window._apply_preset(navigation.SETTINGS_PRESETS[0])
+        self.assertEqual(window._editor_value("charge_limit"), before,
+                         "the editor shows a value no command ever wrote")
+
+
+@unittest.skipUnless(CAN_RUN,
+                     "PySide6 unavailable or no Qt platform plugin")
+class TestChassisFollowsTheModel(unittest.TestCase):
+    """The bay drawing has to be the detected machine, not a default.
+
+    It is shaped in _fill_bays, which only runs once readings arrive — and
+    the sensor read needs elevation, so on an unelevated session it may
+    never run at all. A Laptop 16 was drawn as a Laptop 13 until then.
+    """
+
+    def chassis_of(self, versions):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            make_stub_binary(tmpdir, versions)
+            old = os.environ.get("PATH", "")
+            os.environ["PATH"] = tmpdir + os.pathsep + old
+            try:
+                app = QApplication.instance() or QApplication([])
+                window = fg.App()
+                settle(app, window)
+                shape = (window.chassis.bay_count(),
+                         window.chassis.width(), window.chassis.height())
+                window.close()
+                window.deleteLater()
+                app.processEvents()
+                return shape
+            finally:
+                os.environ["PATH"] = old
+
+    def test_a_laptop_16_is_drawn_with_six_bays(self):
+        bays, _w, _h = self.chassis_of(VERSIONS_L16)
+        self.assertEqual(bays, 6)
+
+    def test_a_desktop_is_drawn_with_two_bays(self):
+        bays, _w, _h = self.chassis_of(VERSIONS_DESKTOP)
+        self.assertEqual(bays, 2)
+
+    def test_a_bigger_chassis_is_drawn_bigger(self):
+        _b, w16, h16 = self.chassis_of(VERSIONS_L16)
+        _b, w12, h12 = self.chassis_of(VERSIONS_L12)
+        self.assertGreater(w16, w12,
+                           "the Laptop 16 is not drawn wider than the 12")
+        self.assertGreater(h16, h12)

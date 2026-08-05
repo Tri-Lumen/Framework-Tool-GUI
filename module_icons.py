@@ -31,6 +31,11 @@ UNKNOWN = "unknown"
 
 # Paths are drawn in an 18x18 box, stroked (never filled), so they read at
 # the row's icon size and at 2x without a second asset.
+#
+# Every segment carries an explicit command letter, for the reason spelled
+# out in `navigation.RAIL_GROUPS`: Qt's SVG parser cannot be relied on to
+# follow SVG's implicit-lineto and repeated-arc shorthands, and silently
+# drops the rest of the path when it meets one.
 ICONS = {
     USB_C: ("M4 7h10a2 2 0 0 1 0 4H4a2 2 0 0 1 0-4z", "M6.2 9h5.6"),
     USB_A: ("M3.5 6h11v6h-11z", "M5.6 8.1h7.2v1.9H5.6z"),
@@ -40,7 +45,8 @@ ICONS = {
     SD: ("M4.4 3.6h5.9l3.3 3.3v7.5h-9.2z", "M6.2 3.6v2.8", "M8 3.6v2.8"),
     ETHERNET: ("M3.8 7h10.4v5H3.8z", "M6.8 7V4.9h4.4V7", "M6.2 12v1.4",
                "M11.8 12v1.4"),
-    AUDIO: ("M9 3.4v6.3", "M6.9 11.9a2.1 2.1 0 1 1 4.2 0 2.1 2.1 0 0 1-4.2 0",
+    AUDIO: ("M9 3.4v6.3",
+            "M6.9 11.9a2.1 2.1 0 1 1 4.2 0a2.1 2.1 0 0 1-4.2 0",
             "M7.4 6.1h3.2"),
     UNKNOWN: ("M4 6.4h10v5.2H4z", "M7 9h4"),
 }

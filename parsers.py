@@ -26,9 +26,29 @@ RE_CYCLES = re.compile(r"Cycle Count:\s*(\d+)")
 RE_AC = re.compile(r"AC is:\s*(\w[\w ]*)")
 RE_RPM = re.compile(r"Fan Speed:\s*(\d+)\s*RPM")
 RE_TEMP = re.compile(r"^\s*(\S+):\s+(-?\d+)\s*C\s*$", re.MULTILINE)
-RE_PORT = re.compile(r"USB-C Port (\d+):")
+# Two different commands report the USB-C ports, and they do not agree on
+# the format:
+#
+#   --pdports              "USB-C Port 0:"                 Power Role / Negotiated
+#   --pdports-chromebook   "USB-C Port 0 (Right Back):"    Role / Voltage Now / Current Lim
+#
+# The first is the Framework-specific EC command and the one the app asks
+# for; it is not implemented by every EC firmware, and where it is missing
+# the CLI still exits 0 having printed only errors. The second goes through
+# the generic Chromium EC path, so it answers on boards the first does not —
+# which is why `parse_ports` reads both and the app falls back to it.
+RE_PORT = re.compile(r"USB-C Port (\d+)(?:\s*\(([^)]*)\))?\s*:")
 RE_NEGO = re.compile(r"Negotiated:\s*([\d.]+)\s*V,\s*(\d+)\s*mA,\s*([\d.]+)\s*W")
-RE_ROLE = re.compile(r"Power Role:\s*(\w+)")
+# "Power Role:" (--pdports) and "Role:" (--pdports-chromebook), but never
+# "Data Role:" or "Dual Role:" — hence the line anchor rather than a bare
+# optional prefix.
+RE_ROLE = re.compile(r"^\s*(?:Power\s+)?Role:\s*(\w+)", re.MULTILINE)
+RE_VOLTAGE_NOW = re.compile(r"Voltage Now:\s*([\d.]+)\s*V")
+RE_CURRENT_LIM = re.compile(r"Current Lim:\s*(\d+)\s*mA")
+RE_MAX_POWER = re.compile(r"Max Power:\s*([\d.]+)\s*W")
+
+# Roles that mean "nothing is attached to this port".
+IDLE_ROLES = frozenset(("disconnected", "nothing", "unknown", "?"))
 
 # ---------- device detection (--versions) ----------
 
@@ -50,22 +70,61 @@ RE_FLAT_VALUE = r"^\s*{}\s*:\s*\"?([^\"\n]+?)\"?\s*$"
 
 
 def parse_ports(text):
-    """Return list of dicts per USB-C port from --pdports output."""
+    """Return list of dicts per USB-C port, from either --pdports format.
+
+    Keys: `port` always; `name` when the CLI labelled the bay; `role`;
+    `volts`/`ma`/`watts` when the port reported a live contract, and
+    `max_watts` when it reported only a ceiling. A port with no power keys
+    negotiated nothing, which the UI shows as idle.
+    """
     ports = []
     matches = list(RE_PORT.finditer(text))
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         block = text[m.start():end]
         d = {"port": m.group(1)}
+        if m.group(2):
+            d["name"] = m.group(2).strip()
         r = RE_ROLE.search(block)
         d["role"] = r.group(1) if r else "?"
         n = RE_NEGO.search(block)
         if n:
+            # --pdports: the contract is stated outright.
             d["volts"] = float(n.group(1))
             d["ma"] = int(n.group(2))
             d["watts"] = float(n.group(3))
+            ports.append(d)
+            continue
+        # --pdports-chromebook: no contract line, so derive it. Voltage and
+        # current limit are what the port is actually carrying; Max Power is
+        # only the ceiling, kept separate so the UI never shows a headline
+        # wattage the port is not delivering.
+        volts = RE_VOLTAGE_NOW.search(block)
+        amps = RE_CURRENT_LIM.search(block)
+        if volts and amps:
+            d["volts"] = float(volts.group(1))
+            d["ma"] = int(amps.group(1))
+            watts = d["volts"] * d["ma"] / 1000.0
+            if watts:
+                d["watts"] = round(watts, 1)
+        power = RE_MAX_POWER.search(block)
+        if power:
+            d["max_watts"] = float(power.group(1))
         ports.append(d)
     return ports
+
+
+def port_is_live(port):
+    """Did this bay negotiate anything, or is it sitting idle?
+
+    A port with a wattage but a disconnected role is still idle — the
+    chromebook path reports a voltage rail on ports with nothing in them.
+    """
+    if not port:
+        return False
+    if (port.get("role") or "?").lower() in IDLE_ROLES:
+        return False
+    return bool(port.get("watts"))
 
 
 # A settings "Get" prints one value in one of a few shapes. These cover the
@@ -73,6 +132,68 @@ def parse_ports(text):
 # filling it with a guess.
 RE_SETTING_PCT = re.compile(r"(\d+)\s*%")
 RE_SETTING_KV = re.compile(r":\s*([A-Za-z0-9.\-]+)\s*$", re.MULTILINE)
+
+# `--charge-limit` prints *two* percentages — "Minimum 0%, Maximum 80%" —
+# and the one the app means by "charge limit" is the maximum. Taking the
+# first percentage on the line reported every machine as limited to 0%.
+RE_CHARGE_MAX = re.compile(r"Maximum\s*(\d+)\s*%", re.IGNORECASE)
+
+# `--fp-led-level` and `--fp-brightness` both print the same block:
+#
+#   Fingerprint LED Brightness
+#     Requested:  Auto
+#     Brightness: 55%
+#
+# so the level and the percentage each need pulling out by name. Reading
+# either one with the generic parser returned the percentage, which is not
+# a value the level combo box has an entry for.
+RE_FP_LEVEL = re.compile(r"Requested:\s*([A-Za-z-]+)", re.IGNORECASE)
+RE_FP_PCT = re.compile(r"Brightness:\s*(\d+)\s*%", re.IGNORECASE)
+
+
+def ac_connected(power_text):
+    """Is an adapter attached? True / False / None when it did not say.
+
+    `--power` prints "AC is: connected" or "AC is: not connected". The
+    charger voltage and input current are printed either way and are not
+    zero on battery, so multiplying them without checking this reported a
+    few watts of phantom AC draw on an unplugged machine.
+    """
+    m = RE_AC.search(power_text or "")
+    if not m:
+        return None
+    value = m.group(1).strip().lower()
+    if value.startswith("not"):
+        return False
+    return value.startswith("connected")
+
+
+def parse_charge_limit(text):
+    """The maximum charge percentage from `--charge-limit`, or ''."""
+    m = RE_CHARGE_MAX.search(text or "")
+    return m.group(1) if m else parse_setting_value(text)
+
+
+def parse_fp_level(text):
+    """The fingerprint LED level, lowercased to match the combo's entries.
+
+    The CLI prints the Rust enum name (`UltraLow`), the CLI *accepts* the
+    kebab-case form (`ultra-low`), and the combo box lists what it accepts —
+    so the round trip needs the conversion.
+    """
+    m = RE_FP_LEVEL.search(text or "")
+    if not m:
+        return ""
+    value = m.group(1)
+    if "-" not in value:
+        value = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", value)
+    return value.lower()
+
+
+def parse_fp_brightness(text):
+    """The fingerprint LED brightness percentage, or ''."""
+    m = RE_FP_PCT.search(text or "")
+    return m.group(1) if m else ""
 
 
 def parse_setting_value(text):

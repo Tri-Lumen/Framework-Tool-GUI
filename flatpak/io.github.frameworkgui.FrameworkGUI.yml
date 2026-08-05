@@ -54,6 +54,7 @@ modules:
       - install -Dm644 framework_gui.py /app/share/framework-gui/framework_gui.py
       # framework_gui.py imports these from its own directory - shipping it
       # without any one of them gives an app that dies on launch.
+      - install -Dm644 app_icon.py /app/share/framework-gui/app_icon.py
       - install -Dm644 appstate.py /app/share/framework-gui/appstate.py
       - install -Dm644 backdrop.py /app/share/framework-gui/backdrop.py
       - install -Dm644 deps.py /app/share/framework-gui/deps.py
@@ -81,16 +82,45 @@ modules:
         /app/share/framework-gui/assets/devices/laptop-16-gpu.png
       - install -Dm644 unknown.png
         /app/share/framework-gui/assets/devices/unknown.png
+      # The app icon, loaded at runtime for the window/taskbar mark.
+      - install -Dm644 FrameworkGUI-16.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-16.png
+      - install -Dm644 FrameworkGUI-32.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-32.png
+      - install -Dm644 FrameworkGUI-48.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-48.png
+      - install -Dm644 FrameworkGUI-64.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-64.png
+      - install -Dm644 FrameworkGUI-128.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-128.png
+      - install -Dm644 FrameworkGUI-256.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI-256.png
+      - install -Dm644 FrameworkGUI.png
+        /app/share/framework-gui/assets/icons/FrameworkGUI.png
       - install -Dm755 framework-gui /app/bin/framework-gui
       - install -Dm644 io.github.frameworkgui.FrameworkGUI.desktop
         /app/share/applications/io.github.frameworkgui.FrameworkGUI.desktop
-      - install -Dm644 io.github.frameworkgui.FrameworkGUI.svg
-        /app/share/icons/hicolor/scalable/apps/io.github.frameworkgui.FrameworkGUI.svg
+      # Real artwork at every size the shell asks for, replacing the
+      # placeholder SVG this used to ship.
+      - install -Dm644 FrameworkGUI-16.png
+        /app/share/icons/hicolor/16x16/apps/io.github.frameworkgui.FrameworkGUI.png
+      - install -Dm644 FrameworkGUI-32.png
+        /app/share/icons/hicolor/32x32/apps/io.github.frameworkgui.FrameworkGUI.png
+      - install -Dm644 FrameworkGUI-48.png
+        /app/share/icons/hicolor/48x48/apps/io.github.frameworkgui.FrameworkGUI.png
+      - install -Dm644 FrameworkGUI-64.png
+        /app/share/icons/hicolor/64x64/apps/io.github.frameworkgui.FrameworkGUI.png
+      - install -Dm644 FrameworkGUI-128.png
+        /app/share/icons/hicolor/128x128/apps/io.github.frameworkgui.FrameworkGUI.png
+      - install -Dm644 FrameworkGUI-256.png
+        /app/share/icons/hicolor/256x256/apps/io.github.frameworkgui.FrameworkGUI.png
       - install -Dm644 LICENSE
         /app/share/licenses/io.github.frameworkgui.FrameworkGUI/LICENSE
     sources:
       - type: file
         path: ../framework_gui.py
+      - type: file
+        path: ../app_icon.py
       - type: file
         path: ../appstate.py
       - type: file
@@ -128,10 +158,22 @@ modules:
       - type: file
         path: ../assets/devices/unknown.png
       - type: file
+        path: ../assets/icons/FrameworkGUI-16.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI-32.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI-48.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI-64.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI-128.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI-256.png
+      - type: file
+        path: ../assets/icons/FrameworkGUI.png
+      - type: file
         path: ../LICENSE
       - type: file
         path: framework-gui
       - type: file
         path: io.github.frameworkgui.FrameworkGUI.desktop
-      - type: file
-        path: io.github.frameworkgui.FrameworkGUI.svg

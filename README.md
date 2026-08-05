@@ -39,17 +39,82 @@ Both builds are produced by
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
 when a release is published and attaches the artifacts to it.
 
+## Documentation
+
+The [wiki](https://github.com/Tri-Lumen/Framework-Tool-GUI/wiki) covers
+installation, each section of the app, per-device support, and
+troubleshooting. Its pages are kept in [`wiki/`](wiki/) in this repository so
+they are reviewed alongside the code they describe.
+
+- [Installation](wiki/Installation.md) — including installing `framework_tool` itself
+- [Using the app](wiki/Using-the-app.md) — the nine sections, one at a time
+- [Device support](wiki/Device-support.md) — which controls each board gets, and why
+- [Troubleshooting](wiki/Troubleshooting.md) — blank readings, "not read" bays, permission prompts
+- [Architecture](wiki/Architecture.md) and [Development](wiki/Development.md) — for anyone changing it
+
+## Screenshots
+
+Every capture below is the app driven against a **simulated** `framework_tool`
+— no Framework hardware was involved, and the device details (board, CPU,
+firmware) are stand-ins, not a real machine's. See
+[Not yet verified](CLAUDE.md#not-yet-verified-be-skeptical-not-confident)
+for what that does and does not prove.
+
+| Overview | Diagnostics |
+| --- | --- |
+| [![Overview](docs/screenshots/overview.png)](docs/screenshots/overview.png) | [![Diagnostics](docs/screenshots/tools.png)](docs/screenshots/tools.png) |
+| Detected board, live stat cards, and the expansion bays. | The twelve workflows, each with the timings you can override. |
+
+| Fans | Ports & modules |
+| --- | --- |
+| [![Fans](docs/screenshots/fans.png)](docs/screenshots/fans.png) | [![Ports](docs/screenshots/ports.png)](docs/screenshots/ports.png) |
+| Duty and RPM control, with automatic control one click away. | Per-port role and negotiated wattage, plus the card queries. |
+
+| Settings | CPU limits |
+| --- | --- |
+| [![Settings](docs/screenshots/settings.png)](docs/screenshots/settings.png) | [![CPU limits](docs/screenshots/power.png)](docs/screenshots/power.png) |
+| Charge presets sit above the rows they write; Auto where the CLI has one. | Real STAPM/PPT limits through RyzenAdj, with the volatility spelled out. |
+
+| Drivers | Setup |
+| --- | --- |
+| [![Drivers](docs/screenshots/drivers.png)](docs/screenshots/drivers.png) | [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) |
+| Framework's downloads page for this exact build, plus vendor drivers. | Detects the helper tools and shows the exact install command first. |
+
+| Console |
+| --- |
+| [![Console](docs/screenshots/console.png)](docs/screenshots/console.png) |
+| Free-form arguments, with the hardware-bricking flags refused. |
+
+### The same app on different devices
+
+Detection is what decides which controls exist. A Laptop 12 gets the stylus,
+touchscreen and tablet-mode rows; a Laptop 16 loses those and gains its
+expansion bay and a six-slot chassis; a Desktop loses everything
+battery-shaped and keeps only the RGB row.
+
+| Laptop 12 | Laptop 16 (Graphics Module) | Desktop |
+| --- | --- | --- |
+| [![Laptop 12](docs/screenshots/device-laptop-12.png)](docs/screenshots/device-laptop-12.png) | [![Laptop 16](docs/screenshots/device-laptop-16.png)](docs/screenshots/device-laptop-16.png) | [![Desktop](docs/screenshots/device-desktop.png)](docs/screenshots/device-desktop.png) |
+| 4 bays, stylus + touchscreen detected | 6 bays, longer chassis, bay reports the GPU | 2 front bays, no battery readings |
+
+The Desktop's Settings pane is the clearest illustration — eight rows on a
+laptop, one here, because that is all the mainboard supports:
+
+[![Desktop settings](docs/screenshots/settings-desktop.png)](docs/screenshots/settings-desktop.png)
+
 ## Repository layout
 
 ```
-framework_gui.py   Qt app — layout, command execution, the 14 diagnostics
+framework_gui.py   Qt app — layout, command execution, the 12 diagnostics
 widgets.py         Reusable UI pieces: cards, panels, bars, badges, the rail
 theme.py           Design tokens and the Qt style sheet built from them
 navigation.py      Rail/pane model and every capability-gated row
 appstate.py        The two UI choices that persist: appearance, drawer height
 backdrop.py        Can this platform composite a translucent window, and how
-device_images.py   Board string → which product photograph to show
+device_images.py   Board string → product photograph, and the chassis
+                   dimensions the Overview's bay drawing is scaled from
 module_icons.py    Expansion-card marks, drawn as SVG paths rather than files
+app_icon.py        Where each packaging path finds the app icon
 parsers.py         Regex parsers + device detection
 power.py           CPU power-limit (TDP) backends: RyzenAdj, Linux powercap,
                    Windows powercfg
@@ -58,6 +123,7 @@ drivers.py         Catalog of Framework's per-build download pages
                    (only framework_gui.py and widgets.py import the toolkit,
                    so everything else is unit-testable without a display)
 assets/devices/    Product photographs for the Overview, one per chassis
+assets/icons/      The app icon: a multi-resolution .ico plus PNGs
 tests/             Logic tests, GUI smoke tests, packaging checks
 windows/           PyInstaller build, Inno Setup script, install/uninstall
 flatpak/           Manifest, .desktop, launcher, icon, its own README

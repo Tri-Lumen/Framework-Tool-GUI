@@ -22,8 +22,8 @@ try {
     $RegKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrameworkGUI"
     # All of these are required: framework_gui.py imports the rest, and a
     # missing one only shows up as ModuleNotFoundError at launch.
-    $SrcFiles = @("framework_gui.py", "appstate.py", "backdrop.py",
-                  "deps.py", "device_images.py", "drivers.py",
+    $SrcFiles = @("framework_gui.py", "app_icon.py", "appstate.py",
+                  "backdrop.py", "deps.py", "device_images.py", "drivers.py",
                   "module_icons.py", "navigation.py", "parsers.py",
                   "power.py", "theme.py",
                   "widgets.py") | ForEach-Object { Join-Path $Here "..\$_" }
@@ -112,6 +112,10 @@ try {
     $lnk.Arguments = "`"$AppDir\framework_gui.py`""
     $lnk.WorkingDirectory = $AppDir
     $lnk.Description = "Control Framework laptop firmware settings"
+    # Without this the shortcut shows pythonw.exe's icon. The .ico came
+    # across with the assets directory copied above.
+    $IconFile = Join-Path $AppDir "assets\icons\FrameworkGUI.ico"
+    if (Test-Path $IconFile) { $lnk.IconLocation = "$IconFile,0" }
     $lnk.Save()
     $bytes = [IO.File]::ReadAllBytes($Shortcut)
     $bytes[0x15] = $bytes[0x15] -bor 0x20   # RunAsAdministrator flag

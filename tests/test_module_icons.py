@@ -111,3 +111,24 @@ class TestCapacity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPathsAreExplicit(unittest.TestCase):
+    """Module marks follow the same rule as the rail icons.
+
+    See `tests/test_navigation.TestIconPaths` for why: SVG's implicit-lineto
+    and repeated-arc shorthands are legal but not reliably parsed by the Qt
+    in the packaged build, which drops the remainder of the path. The audio
+    jack's second arc was written as a repeat and is the one that mattered
+    here.
+    """
+
+    def test_every_icon_path_spells_out_its_commands(self):
+        sys.path.insert(0, os.path.dirname(__file__))
+        from test_navigation import TestIconPaths
+
+        checker = TestIconPaths("test_rail_icons_are_explicit")
+        for module_type, paths in module_icons.ICONS.items():
+            for index, path in enumerate(paths):
+                checker.assert_explicit(
+                    path, "{}[{}]".format(module_type, index))
