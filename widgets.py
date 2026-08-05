@@ -283,13 +283,44 @@ class TimedBar(QWidget):
 
 
 class Badge(QLabel):
-    """A pill: `detected`, `Backend: RyzenAdj`, `not found`."""
+    """A pill: `detected`, `Backend: RyzenAdj`, `not found`.
 
-    def __init__(self, text, variant="ok", parent=None):
+    `elide` caps how wide the pill may get and truncates from the left when
+    the text is longer. The Setup pane puts an installed tool's *full path*
+    in one of these, and a real one is long —
+    `C:\\Users\\…\\AppData\\Local\\Microsoft\\WinGet\\Links\\framework_tool.EXE` —
+    which stretched the row until the Install and Homepage buttons beside it
+    were pushed off the pane entirely. Truncating from the left keeps the
+    end of the path, which is the part that identifies the binary; the full
+    text stays available as the tooltip.
+    """
+
+    def __init__(self, text, variant="ok", parent=None, elide=0):
         super().__init__(text, parent)
         self.setProperty("role", "badge")
         self.setProperty("badge", variant)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._elide = elide
+        self._full = text
+        if elide:
+            self.setMaximumWidth(elide)
+            self.setToolTip(text)
+
+    def setText(self, text):
+        self._full = text
+        if self._elide:
+            self.setToolTip(text)
+        super().setText(text)
+
+    def paintEvent(self, event):
+        if self._elide:
+            metrics = self.fontMetrics()
+            # 18px for the pill's own horizontal padding.
+            room = max(0, self.width() - 18)
+            shown = metrics.elidedText(self._full, Qt.ElideLeft, room)
+            if shown != super().text():
+                super().setText(shown)
+        super().paintEvent(event)
 
     def set_variant(self, variant):
         self.setProperty("badge", variant)

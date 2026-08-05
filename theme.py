@@ -67,6 +67,11 @@ CARD_PADDING = (11, 9)
 
 # Window geometry. Below MIN_PANE_WIDTH the pane list collapses and the rail
 # alone drives navigation; see navigation.py.
+# How wide a badge showing a filesystem path may get before it truncates.
+# Setup shows an installed helper's full path in one, and a real Windows one
+# is long enough to shove the Install/Homepage buttons out of the pane.
+BADGE_PATH_WIDTH = 300
+
 WINDOW_SIZE = (1180, 780)
 MIN_WINDOW_SIZE = (980, 640)
 PANE_COLLAPSE_WIDTH = 1040

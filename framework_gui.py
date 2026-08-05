@@ -1225,8 +1225,9 @@ class App(QMainWindow):
     def _page_ports(self, box, parent):
         self._heading(
             box, parent, "Ports & modules",
-            "Roles and negotiated power come from --pdports; module identity "
-            "from --pd-info, --dp-hdmi-info and --audio-card-info.")
+            "Roles and negotiated power come from --pdports, or from "
+            "--pdports-chromebook on an EC without it; module identity from "
+            "--pd-info, --dp-hdmi-info and --audio-card-info.")
         panel = widgets.Panel(parent)
         panel.body.setSpacing(0)
         panel.body.addWidget(self._port_row(
@@ -1954,8 +1955,11 @@ class App(QMainWindow):
             header = QHBoxLayout()
             header.setSpacing(theme.SPACE[4])
             header.addWidget(label(dep["name"], "name", panel))
+            # Capped: an installed tool's full path can be long enough to
+            # push the buttons beside it off the pane.
             header.addWidget(widgets.Badge(found or "not found",
-                                           "ok" if found else "danger", panel))
+                                           "ok" if found else "danger", panel,
+                                           elide=theme.BADGE_PATH_WIDTH))
             header.addStretch(1)
             install = QPushButton("Reinstall" if found else "Install", panel)
             install.setProperty("role", "accent")

@@ -22,6 +22,7 @@ alongside the caller, and read the "not yet verified" note in CLAUDE.md
 about output formats before assuming the rest still works.
 """
 
+import ast
 import os
 import re
 import sys
@@ -29,9 +30,65 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import framework_gui  # noqa: E402
 import navigation  # noqa: E402
 import power  # noqa: E402
+
+GUI_SOURCE_PATH = os.path.join(os.path.dirname(__file__), "..",
+                               "framework_gui.py")
+
+with open(GUI_SOURCE_PATH, encoding="utf-8") as _fh:
+    GUI_SOURCE = _fh.read()
+
+
+def _app_attribute(name):
+    """Read one class attribute off App without importing framework_gui.
+
+    Importing it would pull in PySide6, and these are logic tests — they run
+    on CI jobs that deliberately have no toolkit installed, which is the
+    whole reason the UI layer is confined to two modules. Parsing the source
+    keeps the assertions running everywhere instead of skipping exactly
+    where a packaging mistake would show up.
+    """
+    tree = ast.parse(GUI_SOURCE)
+    app = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.ClassDef) and node.name == "App")
+    for statement in app.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        for target in statement.targets:
+            if not (isinstance(target, ast.Name) and target.id == name):
+                continue
+            value = statement.value
+            if isinstance(value, ast.Dict):
+                # Only the keys are literals — SETTING_PARSERS maps them to
+                # function references, which do not survive literal_eval and
+                # are not what is being asserted about anyway.
+                return [ast.literal_eval(key) for key in value.keys]
+            return ast.literal_eval(value)
+    raise AssertionError("App has no attribute " + name)
+
+
+BLOCKED = _app_attribute("BLOCKED")
+SETTING_PARSER_NAMES = set(_app_attribute("SETTING_PARSERS"))
+
+
+class TestSourceExtraction(unittest.TestCase):
+    """The parsing above must not fail open.
+
+    An empty set here would make the blocked-flag assertions pass without
+    checking anything, which is a worse outcome than the import error this
+    replaced.
+    """
+
+    def test_blocked_flags_were_found(self):
+        self.assertIn("--flash-ec", BLOCKED)
+        self.assertGreaterEqual(len(BLOCKED), 5)
+
+    def test_setting_parsers_were_found(self):
+        self.assertIn("charge_limit", SETTING_PARSER_NAMES)
+
+    def test_the_source_was_read(self):
+        self.assertIn("class App", GUI_SOURCE)
 
 # ---------------------------------------------------------------------------
 # framework_tool's published interface.
@@ -152,7 +209,7 @@ class TestSettingsRowsUseRealFlags(unittest.TestCase):
         for row in navigation.SETTINGS_ROWS:
             name = row.get("parse")
             if name is not None:
-                self.assertIn(name, framework_gui.App.SETTING_PARSERS,
+                self.assertIn(name, SETTING_PARSER_NAMES,
                               f"{row['key']} names unknown parser {name!r}")
 
     def test_a_row_with_no_read_offers_no_get(self):
@@ -179,14 +236,7 @@ class TestPortQueriesUseRealFlags(unittest.TestCase):
 class TestAppCommandsUseRealFlags(unittest.TestCase):
     """Sweep the source for argument lists handed to _exec/run."""
 
-    SOURCE = None
-
-    @classmethod
-    def setUpClass(cls):
-        path = os.path.join(os.path.dirname(__file__), "..",
-                            "framework_gui.py")
-        with open(path, encoding="utf-8") as fh:
-            cls.SOURCE = fh.read()
+    SOURCE = GUI_SOURCE
 
     def emitted_flags(self):
         """Every framework_tool flag that appears in an argument list.
@@ -233,13 +283,13 @@ class TestAppCommandsUseRealFlags(unittest.TestCase):
 
     def test_blocked_flags_are_flags_that_exist(self):
         """Blocking a misspelled flag protects nothing."""
-        for flag in framework_gui.App.BLOCKED:
+        for flag in BLOCKED:
             self.assertIn(flag, FRAMEWORK_TOOL_FLAGS,
                           f"{flag} is blocked but is not a real flag")
 
     def test_nothing_blocked_is_reachable_from_a_button(self):
         self.assertEqual(
-            framework_gui.App.BLOCKED & self.emitted_flags(), set(),
+            BLOCKED & self.emitted_flags(), set(),
             "a blocked flag is wired to a control")
 
     def test_the_port_fallback_is_wired_up(self):
