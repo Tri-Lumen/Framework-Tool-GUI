@@ -297,3 +297,120 @@ class TestFindInTree(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The real asset list from a RyzenAdj release. Two entries match "win64"
+# and only one of them contains ryzenadj.exe — libryzenadj-win64.zip is the
+# library (DLL, .lib, header) and has no executable in it at all. Picking
+# the wrong one is a download that "succeeds" and then reports that the
+# binary is nowhere to be found, which is exactly what happened.
+RYZENADJ_ASSETS = [
+    {"name": "libryzenadj-win64.zip"},
+    {"name": "ryzenadj-linux-musl-static-x86_64.tar.gz"},
+    {"name": "ryzenadj-manylinux_2_28-x86_64.tar.gz"},
+    {"name": "ryzenadj-win64.zip"},
+]
+
+
+class TestAssetPicking(unittest.TestCase):
+
+    def test_the_cli_archive_wins_over_the_library(self):
+        picked = deps.pick_asset(RYZENADJ_ASSETS, "win64", "ryzenadj.exe")
+        self.assertEqual(picked["name"], "ryzenadj-win64.zip")
+
+    def test_the_library_loses_even_without_a_binary_hint(self):
+        # The lib- prefix is penalised on its own, so a registry entry that
+        # forgets to name its binary still does not get the library.
+        picked = deps.pick_asset(RYZENADJ_ASSETS, "win64")
+        self.assertEqual(picked["name"], "ryzenadj-win64.zip")
+
+    def test_the_matching_binary_scores_above_the_library(self):
+        self.assertGreater(
+            deps.asset_score("ryzenadj-win64.zip", "win64", "ryzenadj.exe"),
+            deps.asset_score("libryzenadj-win64.zip", "win64",
+                             "ryzenadj.exe"))
+
+    def test_a_non_matching_asset_scores_none(self):
+        self.assertIsNone(
+            deps.asset_score("ryzenadj-linux.tar.gz", "win64",
+                             "ryzenadj.exe"))
+
+    def test_debug_and_source_builds_are_penalised(self):
+        assets = [{"name": "tool-win64-debug.zip"},
+                  {"name": "tool-win64-src.zip"},
+                  {"name": "tool-win64.zip"}]
+        self.assertEqual(deps.pick_asset(assets, "win64", "tool.exe")["name"],
+                         "tool-win64.zip")
+
+    def test_no_match_is_still_none(self):
+        self.assertIsNone(deps.pick_asset(RYZENADJ_ASSETS, "macos"))
+        self.assertIsNone(deps.pick_asset([], "win64"))
+        self.assertIsNone(deps.pick_asset(None, "win64"))
+
+    def test_ties_keep_the_api_order(self):
+        assets = [{"name": "a-win64.zip"}, {"name": "b-win64.zip"}]
+        self.assertEqual(deps.pick_asset(assets, "win64")["name"],
+                         "a-win64.zip")
+
+    def test_the_registry_names_the_binary_it_wants(self):
+        # Without this the tie-break above has nothing to work with.
+        spec = deps.get("ryzenadj")["windows"]
+        self.assertEqual(spec["binary"], "ryzenadj.exe")
+
+
+class TestCleanup(unittest.TestCase):
+    """Unpacking leaves the archive behind; every reinstall left another."""
+
+    LISTING = ["ryzenadj-win64.zip", "old-win64.zip", "ryzenadj.exe",
+               "WinRing0x64.dll", "WinRing0x64.sys", "libryzenadj.dll",
+               "notes.txt"]
+
+    def targets(self, keep=()):
+        return deps.cleanup_targets("/tools", keep,
+                                    lister=lambda _d: list(self.LISTING),
+                                    isfile=lambda _p: True)
+
+    def test_only_archives_are_removed(self):
+        names = [os.path.basename(p) for p in self.targets()]
+        self.assertEqual(names, ["old-win64.zip", "ryzenadj-win64.zip"])
+
+    def test_the_unpacked_payload_is_left_alone(self):
+        # These are what let ryzenadj reach the SoC — deleting them would
+        # break the tool the install just placed.
+        names = [os.path.basename(p) for p in self.targets()]
+        for keep in ("ryzenadj.exe", "WinRing0x64.dll", "WinRing0x64.sys",
+                     "libryzenadj.dll"):
+            self.assertNotIn(keep, names)
+
+    def test_keep_spares_a_named_archive(self):
+        names = [os.path.basename(p)
+                 for p in self.targets(keep=("ryzenadj-win64.zip",))]
+        self.assertEqual(names, ["old-win64.zip"])
+
+    def test_cleanup_reports_what_it_removed(self):
+        removed, failed = deps.cleanup(
+            "/tools", lister=lambda _d: ["a-win64.zip"],
+            isfile=lambda _p: True, remove=lambda _p: None)
+        self.assertEqual(removed, ["a-win64.zip"])
+        self.assertEqual(failed, [])
+
+    def test_a_locked_file_is_reported_not_raised(self):
+        # A failed tidy-up must never turn a successful install into an
+        # error the user sees as a failed install.
+        def boom(_path):
+            raise OSError("in use")
+
+        removed, failed = deps.cleanup(
+            "/tools", lister=lambda _d: ["a-win64.zip"],
+            isfile=lambda _p: True, remove=boom)
+        self.assertEqual(removed, [])
+        self.assertEqual(failed, ["a-win64.zip"])
+
+    def test_a_missing_directory_is_not_an_error(self):
+        self.assertEqual(deps.cleanup_targets("/nope"), [])
+
+    def test_is_archive(self):
+        self.assertTrue(deps.is_archive("x.zip"))
+        self.assertTrue(deps.is_archive("x.TAR.GZ"))
+        self.assertFalse(deps.is_archive("ryzenadj.exe"))
+        self.assertFalse(deps.is_archive(""))

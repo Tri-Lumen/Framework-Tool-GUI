@@ -12,9 +12,13 @@ packaging path knows about it — that's the point.
 """
 
 import os
+import sys
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+
+import app_icon  # noqa: E402
 
 # Modules that make up the app itself (tests/ and tooling excluded).
 APP_MODULES = sorted(
@@ -33,10 +37,10 @@ class TestAppModules(unittest.TestCase):
     def test_expected_modules_present(self):
         # A sanity anchor: if this changes, the rest of the file needs a look.
         self.assertEqual(APP_MODULES, [
-            "appstate.py", "backdrop.py", "deps.py", "device_images.py",
-            "drivers.py", "framework_gui.py", "module_icons.py",
-            "navigation.py", "parsers.py", "power.py", "theme.py",
-            "widgets.py"])
+            "app_icon.py", "appstate.py", "backdrop.py", "deps.py",
+            "device_images.py", "drivers.py", "framework_gui.py",
+            "module_icons.py", "navigation.py", "parsers.py", "power.py",
+            "theme.py", "widgets.py"])
 
     def test_only_the_ui_layer_imports_the_toolkit(self):
         """The logic modules stay testable without a display.
@@ -293,3 +297,77 @@ class TestReleaseWorkflow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAppIcon(unittest.TestCase):
+    """The app icon is data too, and every path has to carry it.
+
+    The app shipped without one: the exe took PyInstaller's generic icon,
+    the window and taskbar showed Qt's default, and the Flatpak carried a
+    placeholder SVG. These assert the artwork exists and that each packaging
+    path actually installs it, since a missing icon is invisible from a
+    source checkout — `app_icon` falls back silently by design, so nothing
+    fails loudly when a build forgets it.
+    """
+
+    ICON_DIR = os.path.join(REPO, "assets", "icons")
+
+    def test_every_named_icon_file_is_shipped(self):
+        for name in app_icon.FILES:
+            self.assertTrue(
+                os.path.isfile(os.path.join(self.ICON_DIR, name)),
+                f"app_icon names {name} but assets/icons does not have it")
+
+    def test_the_windows_icon_is_a_real_ico(self):
+        with open(os.path.join(self.ICON_DIR, app_icon.ICO), "rb") as fh:
+            header = fh.read(4)
+        # ICONDIR: reserved=0, type=1 (icon).
+        self.assertEqual(header[:4], b"\x00\x00\x01\x00")
+
+    def test_the_ico_carries_the_small_sizes(self):
+        """A single 256px image scales badly to a 16px taskbar mark."""
+        path = os.path.join(self.ICON_DIR, app_icon.ICO)
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        count = int.from_bytes(blob[4:6], "little")
+        widths = {blob[6 + n * 16] or 256 for n in range(count)}
+        self.assertIn(16, widths)
+        self.assertIn(32, widths)
+        self.assertIn(256, widths)
+
+    def test_pyinstaller_is_told_to_use_the_icon(self):
+        build = read("windows", "build.bat")
+        self.assertIn("--icon", build,
+                      "the exe would ship with PyInstaller's default icon")
+        self.assertIn(app_icon.ICO, build)
+
+    def test_inno_setup_uses_the_icon(self):
+        iss = read("windows", "installer.iss")
+        self.assertIn("SetupIconFile", iss)
+        self.assertIn(app_icon.ICO, iss)
+
+    def test_the_script_install_gives_its_shortcut_the_icon(self):
+        # Otherwise the Start Menu entry shows pythonw.exe's icon.
+        install = read("windows", "install.ps1")
+        self.assertIn("IconLocation", install)
+        self.assertIn(app_icon.ICO, install)
+
+    def test_the_flatpak_installs_the_icon_into_the_theme(self):
+        manifest = read(TestFlatpakPackaging.MANIFEST)
+        for size in app_icon.SIZES:
+            self.assertIn(
+                f"/app/share/icons/hicolor/{size}x{size}/apps/", manifest,
+                f"no hicolor {size}px icon in the Flatpak manifest")
+
+    def test_the_flatpak_ships_the_icons_for_the_app_to_load(self):
+        manifest = read(TestFlatpakPackaging.MANIFEST)
+        for name in app_icon.PNG_SIZED:
+            self.assertIn(f"path: ../assets/icons/{name}", manifest,
+                          f"Flatpak manifest does not list {name} as a source")
+
+    def test_the_placeholder_svg_is_gone(self):
+        # It was a crude stand-in; real artwork replaced it.
+        self.assertFalse(os.path.isfile(os.path.join(
+            REPO, "flatpak", "io.github.frameworkgui.FrameworkGUI.svg")))
+        self.assertNotIn("FrameworkGUI.svg",
+                         read(TestFlatpakPackaging.MANIFEST))

@@ -12,6 +12,8 @@ paint themselves; everything else is styled by the sheet and carries only a
 `role` property.
 """
 
+import time
+
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import device_images
 import module_icons
 import theme
 
@@ -174,6 +177,108 @@ class Bar(QWidget):
             fill = QRectF(0, 0, self.width() * self._fraction, self.height())
             painter.setBrush(QColor(*theme.parse_colour(self._colour)))
             painter.drawRoundedRect(fill, radius, radius)
+        painter.end()
+
+
+class TimedBar(QWidget):
+    """A determinate progress bar for a tool whose length is known up front.
+
+    A thirty-second fan burst is a wall-clock wait, not a sequence of
+    stages, and drawing it as six countdown cells said "6 steps" when the
+    honest answer was "30 seconds". This fills smoothly against elapsed
+    time, so the picture matches what is actually happening.
+
+    Animation is deliberate and twofold: the fill advances every tick rather
+    than once per step, and a soft highlight travels along the filled part
+    so the bar reads as *running* even while the fill barely moves. Both
+    stop dead when the tool does — the timer is a repaint tick, never a
+    background worker, and nothing ticks while the app is idle.
+
+    `elapsed()` is injectable-free but monotonic: a wall-clock change part
+    way through a burst must not make the bar jump.
+    """
+
+    HEIGHT = 8
+    TICK_MS = 40
+    SHEEN_PERIOD_MS = 1600
+    SHEEN_WIDTH = 0.18          # fraction of the full track
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._duration = 0.0
+        self._started = None
+        self._fraction = 0.0
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self, duration):
+        self._duration = max(0.0, float(duration or 0.0))
+        self._started = time.monotonic()
+        self._fraction = 0.0
+        self._phase = 0.0
+        if not self._timer.isActive():
+            self._timer.start(self.TICK_MS)
+        self.update()
+
+    def stop(self, complete=True):
+        """Freeze the bar — full if the tool ran to the end, where it is if
+        it was cancelled, so a cancelled run does not read as a finished one.
+        """
+        self._timer.stop()
+        if complete:
+            self._fraction = 1.0
+        self._started = None
+        self.update()
+
+    def elapsed(self):
+        return 0.0 if self._started is None else time.monotonic() - self._started
+
+    def remaining(self):
+        return max(0.0, self._duration - self.elapsed())
+
+    def fraction(self):
+        return self._fraction
+
+    def _tick(self):
+        if self._duration > 0 and self._started is not None:
+            self._fraction = min(1.0, self.elapsed() / self._duration)
+        self._phase = (self._phase
+                       + self.TICK_MS / float(self.SHEEN_PERIOD_MS)) % 1.0
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        radius = self.height() / 2.0
+        width = self.width()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(qcolour("track"))
+        painter.drawRoundedRect(QRectF(0, 0, width, self.height()),
+                                radius, radius)
+        if self._fraction <= 0:
+            painter.end()
+            return
+        filled = width * self._fraction
+        painter.setBrush(qcolour("accent"))
+        painter.drawRoundedRect(QRectF(0, 0, filled, self.height()),
+                                radius, radius)
+        # The travelling highlight, clipped to the filled part so it never
+        # paints over empty track.
+        if self._timer.isActive() and filled > 1:
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(QRectF(0, 0, filled, self.height()),
+                                radius, radius)
+            painter.setClipPath(clip)
+            sheen = width * self.SHEEN_WIDTH
+            x = self._phase * (filled + sheen) - sheen
+            painter.setBrush(qcolour("accent.bright"))
+            painter.drawRoundedRect(QRectF(x, 0, sheen, self.height()),
+                                    radius, radius)
+            painter.restore()
         painter.end()
 
 
@@ -469,26 +574,79 @@ class Grabber(QWidget):
 
 
 class ChassisDiagram(QWidget):
-    """The 300x112 line drawing of the chassis with its four bays.
+    """A line drawing of *this* chassis, with the bays it actually has.
 
     Bay outline colour carries the port's state, which is the only reason
     the drawing is here at all: it is a legend for the module rows beside
     it, not decoration.
+
+    The drawing used to be one fixed 300x112 rectangle with four bays at
+    hard-coded coordinates, identical for every machine. It now takes its
+    proportions from `device_images.chassis_for()` — width against the
+    widest Framework chassis, height from that model's own width:depth
+    ratio — and lays out the number of slots the chassis really carries.
+    A Laptop 12 is visibly smaller than a Laptop 16, the 16 shows its six
+    slots rather than four, and the Desktop is drawn as the cube it is with
+    its two front slots.
     """
 
-    # x, y of each bay, in the order the design lists them: left front,
-    # left rear, right front, right rear.
-    BAYS = ((8, 24), (8, 54), (280, 24), (280, 54))
+    MAX_WIDTH = 300
+    MAX_HEIGHT = 150
+    BAY_W, BAY_H = 12, 22       # a side slot; the front layout swaps these
+    MARGIN = 10                 # room for the slot tabs outside the body
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(300, 112)
-        self._states = ["idle"] * 4
+        self._chassis = dict(device_images.DEFAULT_CHASSIS)
+        self._states = []
+        self._apply_geometry()
+
+    def set_chassis(self, chassis):
+        """Reshape for a detected board. Safe to call on every rescan."""
+        self._chassis = dict(chassis or device_images.DEFAULT_CHASSIS)
+        self._apply_geometry()
+        self.update()
+
+    def bay_count(self):
+        return int(self._chassis.get("bays", 4))
+
+    @classmethod
+    def pixels_per_mm(cls):
+        """One scale for every chassis, sized so the largest just fits.
+
+        It has to be shared. Fitting each model to the box independently
+        makes them all come out the same size — which is the bug this whole
+        widget exists to fix, since the Framework laptops have nearly
+        identical width:depth ratios and differ mainly in absolute size.
+        """
+        avail_w = cls.MAX_WIDTH - 2 * cls.MARGIN - cls.BAY_W
+        avail_h = cls.MAX_HEIGHT - 2 * cls.MARGIN - 6
+        widest = max(c["width_mm"] for c in device_images.CHASSIS)
+        deepest = max(c["depth_mm"] for c in device_images.CHASSIS)
+        return min(avail_w / widest, avail_h / deepest)
+
+    def _apply_geometry(self):
+        scale = self.pixels_per_mm()
+        body_w = float(self._chassis["width_mm"]) * scale
+        body_h = float(self._chassis["depth_mm"]) * scale
+        self._body = QRectF(self.MARGIN + self.BAY_W / 2.0, self.MARGIN,
+                            body_w, body_h)
+        self.setFixedSize(
+            int(body_w + 2 * self.MARGIN + self.BAY_W),
+            int(body_h + 2 * self.MARGIN + 6))
 
     def set_states(self, states):
-        """states: one of 'sink', 'source', 'idle', 'empty' per bay."""
-        self._states = (list(states) + ["empty"] * 4)[:4]
+        """states: one of 'sink', 'source', 'idle', 'empty' per bay.
+
+        Fewer states than slots is normal and not an error — every platform
+        reports at most four PD ports while the Laptop 16 has six slots, so
+        the extra slots are simply drawn unreported.
+        """
+        self._states = list(states)
         self.update()
+
+    def _state(self, index):
+        return self._states[index] if index < len(self._states) else "empty"
 
     def _bay_colour(self, state):
         return {
@@ -497,27 +655,59 @@ class ChassisDiagram(QWidget):
             "idle": colour("warn"),
         }.get(state, colour("icon"))
 
+    def bay_rects(self):
+        """Where each slot is drawn. Split out so the layout is testable."""
+        body, count = self._body, self.bay_count()
+        rects = []
+        if self._chassis.get("layout") == "front":
+            # Front-facing slots along the bottom edge, lying flat.
+            w, h = self.BAY_H, self.BAY_W
+            for i in range(count):
+                x = body.left() + body.width() * (i + 1) / (count + 1) - w / 2
+                rects.append(QRectF(x, body.bottom() - h / 2, w, h))
+            return rects
+        # Side slots, split evenly between the two edges, front to rear.
+        left = (count + 1) // 2
+        for i in range(count):
+            side_index = i if i < left else i - left
+            per_side = left if i < left else count - left
+            x = (body.left() - self.BAY_W / 2.0 if i < left
+                 else body.right() - self.BAY_W / 2.0)
+            y = (body.top() + body.height() * (side_index + 1) / (per_side + 1)
+                 - self.BAY_H / 2.0)
+            rects.append(QRectF(x, y, self.BAY_W, self.BAY_H))
+        return rects
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setBrush(Qt.NoBrush)
+        body = self._body
         pen = painter.pen()
         pen.setColor(qcolour("icon"))
         pen.setWidthF(1.3)
         painter.setPen(pen)
-        painter.drawRoundedRect(QRectF(20, 14, 260, 72), 6, 6)
-        painter.drawLine(6, 98, 294, 98)
+        painter.drawRoundedRect(body, 6, 6)
+        # The lid line, which reads as a laptop; a desktop has no such edge.
+        if self._chassis.get("layout") != "front":
+            painter.drawLine(int(body.left() - self.BAY_W / 2),
+                             int(body.bottom() + 8),
+                             int(body.right() + self.BAY_W / 2),
+                             int(body.bottom() + 8))
         pen.setColor(qcolour("track"))
         pen.setWidthF(1.0)
         painter.setPen(pen)
-        painter.drawRoundedRect(QRectF(34, 26, 232, 46), 3, 3)
-        for (x, y), state in zip(self.BAYS, self._states):
+        inset = body.adjusted(body.width() * 0.06, body.height() * 0.16,
+                              -body.width() * 0.06, -body.height() * 0.20)
+        painter.drawRoundedRect(inset, 3, 3)
+        for index, rect in enumerate(self.bay_rects()):
+            state = self._state(index)
             pen.setColor(QColor(self._bay_colour(state)))
             pen.setWidthF(1.1)
             painter.setPen(pen)
             painter.setBrush(qcolour("inset") if state != "empty"
                              else Qt.NoBrush)
-            painter.drawRoundedRect(QRectF(x, y, 12, 22), 2, 2)
+            painter.drawRoundedRect(rect, 2, 2)
         painter.end()
 
 

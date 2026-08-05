@@ -48,6 +48,57 @@ LAPTOP_16_GPU = "laptop-16-gpu.png"
 IMAGES = tuple(entry["image"] for entry in CATALOG) + (LAPTOP_16_GPU, FALLBACK)
 
 
+# ---------- chassis geometry ----------
+#
+# The Overview's bay drawing used to be one 300x112 rectangle with four bays
+# at fixed coordinates, for every machine — a Laptop 12 and a Laptop 16 got
+# the identical picture despite being 70mm apart in width and differing in
+# how many expansion bays they have at all.
+#
+# These are the published external dimensions, in millimetres, and the
+# number of expansion-card bays each chassis carries. `widgets.ChassisDiagram`
+# scales its drawing from the width/depth ratio and lays out `bays` slots,
+# so the picture is at least proportionally honest about which machine it is.
+#
+# `bays` is the *physical* slot count, which is not the same as the number
+# of USB-C PD ports: upstream reports at most four PD ports on every
+# platform, while the Laptop 16 has six card slots. The diagram draws the
+# slots the chassis has and colours the ones the CLI reported.
+
+DEFAULT_CHASSIS = {"width_mm": 296.6, "depth_mm": 229.0, "bays": 4,
+                   "layout": "sides", "label": "Framework Laptop 13"}
+
+CHASSIS = (
+    {"match": ("laptop 12",), "width_mm": 287.6, "depth_mm": 218.9,
+     "bays": 4, "layout": "sides", "label": "Framework Laptop 12"},
+    {"match": ("laptop 13",), "width_mm": 296.6, "depth_mm": 229.0,
+     "bays": 4, "layout": "sides", "label": "Framework Laptop 13"},
+    {"match": ("laptop 16",), "width_mm": 356.6, "depth_mm": 270.0,
+     "bays": 6, "layout": "sides", "label": "Framework Laptop 16"},
+    # The Desktop is a 4.5-litre cube, not a clamshell, and carries two
+    # front expansion-card slots rather than four along its sides.
+    {"match": ("desktop",), "width_mm": 205.0, "depth_mm": 226.0,
+     "bays": 2, "layout": "front", "label": "Framework Desktop"},
+)
+
+# The widest chassis, which the drawing scales everything else against.
+WIDEST_MM = max(entry["width_mm"] for entry in CHASSIS)
+
+
+def chassis_for(board):
+    """Physical proportions and bay count for a board string.
+
+    Falls back to the Laptop 13's geometry — the middle of the range — for
+    an unrecognised board, on the same principle as `image_for`: a
+    reasonable drawing beats a blank one.
+    """
+    text = (board or "").lower()
+    for entry in CHASSIS:
+        if all(fragment in text for fragment in entry["match"]):
+            return dict(entry)
+    return dict(DEFAULT_CHASSIS)
+
+
 def image_for(board, has_gpu_module=False):
     """The image filename for a board string from `--versions`.
 

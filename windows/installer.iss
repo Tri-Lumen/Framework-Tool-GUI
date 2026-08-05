@@ -36,6 +36,10 @@ PrivilegesRequired=lowest
 LicenseFile=..\LICENSE
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
+; The Framework mark, on the setup wizard and on the Apps & features entry.
+; The exe carries the same .ico via PyInstaller's --icon, so the Start Menu
+; shortcuts below need no IconFilename of their own.
+SetupIconFile=..\assets\icons\FrameworkGUI.ico
 WizardStyle=modern
 
 [Files]

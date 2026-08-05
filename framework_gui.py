@@ -53,10 +53,11 @@ import time
 import webbrowser
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontDatabase, QGuiApplication, QPixmap
+from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -72,6 +73,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import app_icon
 import appstate
 import backdrop
 import deps
@@ -93,11 +95,16 @@ from parsers import (
     RE_RPM,
     RE_SOC,
     RE_TEMP,
+    ac_connected,
     detect_model,
+    parse_charge_limit,
     parse_firmware,
+    parse_fp_brightness,
+    parse_fp_level,
     parse_ports,
     parse_setting_value,
     parse_tool_version,
+    port_is_live,
 )
 from widgets import colour, label, rule, section_label
 
@@ -344,7 +351,22 @@ class Drawer(QWidget):
 
 
 class ToolDetail(widgets.Panel):
-    """The multi-step tool panel: title, running badge, cancel, step grid."""
+    """The running-tool panel: title, running badge, cancel, and progress.
+
+    Progress is drawn one of two ways, chosen by the tool (see
+    `navigation.MODE_*`):
+
+      bar    one animated `TimedBar` plus a live readout, for a tool whose
+             length is known before it starts. A thirty-second burst is a
+             wait, and six countdown cells described it as a six-stage
+             procedure it never was.
+      steps  the cell grid, for a sequence of commands whose individual
+             durations are not knowable — the full system report, where
+             "4 of 6" really is the best available answer.
+
+    Both live in the panel at once and only one is ever visible, so
+    switching modes between runs needs no rebuild.
+    """
 
     COLUMNS = 6
 
@@ -375,16 +397,62 @@ class ToolDetail(widgets.Panel):
         header.addWidget(self.cancel)
         self.body.addLayout(header)
 
+        # --- bar mode ---
+        self.bar_box = QWidget(self)
+        bar_layout = QVBoxLayout(self.bar_box)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(theme.SPACE[2])
+        self.bar = widgets.TimedBar(self.bar_box)
+        bar_layout.addWidget(self.bar)
+        bar_row = QHBoxLayout()
+        bar_row.setSpacing(theme.SPACE[4])
+        self.bar_note = label("", "caption", self.bar_box)
+        bar_row.addWidget(self.bar_note)
+        bar_row.addStretch(1)
+        self.bar_clock = label("", "mono", self.bar_box)
+        bar_row.addWidget(self.bar_clock)
+        bar_layout.addLayout(bar_row)
+        self.body.addWidget(self.bar_box)
+        self.bar_box.setVisible(False)
+
+        # The clock ticks from the UI thread; the worker only reports what
+        # it is doing. Keeping the countdown off the worker means it stays
+        # smooth even while a command blocks.
+        self._clock = QTimer(self)
+        self._clock.timeout.connect(self._tick_clock)
+
+        # --- step mode ---
+        self.grid_box = QWidget(self)
+        grid_outer = QVBoxLayout(self.grid_box)
+        grid_outer.setContentsMargins(0, 0, 0, 0)
         self.grid = QGridLayout()
         self.grid.setSpacing(theme.SPACE[3])
-        self.body.addLayout(self.grid)
+        grid_outer.addLayout(self.grid)
+        self.body.addWidget(self.grid_box)
         self._cells = []
+        self._mode = navigation.MODE_STEPS
 
-    def begin(self, title, total):
+    def begin(self, title, total, mode=navigation.MODE_STEPS, duration=0):
         self.title.setText(title)
-        self._reset_cells(total)
+        self._mode = mode
+        bar_mode = mode == navigation.MODE_BAR and duration > 0
+        self.bar_box.setVisible(bar_mode)
+        self.grid_box.setVisible(not bar_mode)
+        if bar_mode:
+            self.bar_note.setText("starting…")
+            self.bar.start(duration)
+            self._clock.start(200)
+            self._tick_clock()
+        else:
+            self._reset_cells(total)
         self.spinner.start()
         self.setVisible(True)
+
+    def _tick_clock(self):
+        remaining = self.bar.remaining()
+        self.bar_clock.setText("{:.0f}s left · {:.0f}%".format(
+            remaining, self.bar.fraction() * 100))
+        self.progress.setText("running")
 
     def _reset_cells(self, total):
         while self.grid.count():
@@ -406,6 +474,13 @@ class ToolDetail(widgets.Panel):
             self._cells.append((name, value, bar))
 
     def update_step(self, index, step, total, name, value, fraction):
+        if self._mode == navigation.MODE_BAR:
+            # In bar mode the worker's step report is a caption, not a
+            # position: the bar's position is elapsed time.
+            self.bar_note.setText(
+                "{} · {}".format(name, value) if value and value != "…"
+                else str(name))
+            return
         self.progress.setText("running · step {} of {}".format(step, total))
         if 0 <= index < len(self._cells):
             cell_name, cell_value, bar = self._cells[index]
@@ -413,15 +488,25 @@ class ToolDetail(widgets.Panel):
             cell_value.setText(value)
             bar.set_accent(fraction)
 
-    def finish(self):
+    def finish(self, cancelled=False):
         self.spinner.stop()
-        self.progress.setText("finished")
+        self._clock.stop()
+        self.bar.stop(complete=not cancelled)
+        if self._mode == navigation.MODE_BAR:
+            self.bar_clock.setText("cancelled" if cancelled else "done")
+            self.bar_note.setText("")
+        self.progress.setText("cancelled" if cancelled else "finished")
 
 
 class App(QMainWindow):
     BLOCKED = {"--flash-ec", "--flash-ro-ec", "--flash-rw-ec",
                "--flash-gpu-descriptor", "--flash-gpu-descriptor-file",
                "-f", "--force"}
+
+    # How often the fan burst writes a countdown line to the drawer. The
+    # progress bar is driven by the clock, so this only controls the log's
+    # granularity and how quickly a cancel is noticed.
+    BURST_LOG_INTERVAL = 5.0
 
     # Worker threads never touch a widget; they emit these and Qt delivers
     # them on the UI thread. Same rule the Tk version followed with after().
@@ -476,6 +561,7 @@ class App(QMainWindow):
         self.rail_key = "overview"
         self.pages = {}
         self.tool_rows = {}
+        self.tool_param_widgets = {}
         self.port_buttons = {}
         self.settings_widgets = {}
 
@@ -570,7 +656,7 @@ class App(QMainWindow):
         row.setSpacing(theme.SPACE[4])
         icon = QLabel(bar)
         icon.setPixmap(widgets.stroke_pixmap(
-            ("M8 1.5 15 14H1z", "M8 6v4", "M8 11.8v.4"), colour("warn"), 14))
+            ("M8 1.5L15 14H1z", "M8 6v4", "M8 11.8v.4"), colour("warn"), 14))
         row.addWidget(icon)
         row.addWidget(label("Not running as root — most commands will fail.",
                             "bannerText", bar))
@@ -793,6 +879,7 @@ class App(QMainWindow):
             widget.deleteLater()
         self.pages = {}
         self.tool_rows = {}
+        self.tool_param_widgets = {}
         self.port_buttons = {}
         self.settings_widgets = {}
         builders = {
@@ -890,14 +977,23 @@ class App(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(section_label("Expansion bays", panel))
         header.addStretch(1)
-        header.addWidget(label(
-            "left front → right rear · negotiated power from --pdports",
-            "caption", panel))
+        # Not "left front → right rear": the rows are in the order the CLI
+        # reports its ports, and it labels them itself where it can. Nor
+        # "from --pdports" specifically — the app falls back to
+        # --pdports-chromebook on an EC without the first command.
+        self.bay_source = label("negotiated power, in CLI port order",
+                                "caption", panel)
+        header.addWidget(self.bay_source)
         panel.body.addLayout(header)
 
         bays = QHBoxLayout()
         bays.setSpacing(theme.SPACE[6])
         self.chassis = widgets.ChassisDiagram(panel)
+        # Shape it from the detected model now, not only when readings
+        # arrive: the sensor read needs elevation and may never happen, and
+        # until it did a Laptop 16 was drawn with the default chassis.
+        self.chassis.set_chassis(
+            device_images.chassis_for(self.caps.get("model", "")))
         bays.addWidget(self.chassis, 0, Qt.AlignTop)
         module_grid = QGridLayout()
         module_grid.setSpacing(theme.SPACE[3])
@@ -921,6 +1017,9 @@ class App(QMainWindow):
             self.module_rows.append((icon, name, detail))
         bays.addLayout(module_grid, 1)
         panel.body.addLayout(bays)
+        self.cards_line = label("", "caption", panel)
+        self.cards_line.setVisible(False)
+        panel.body.addWidget(self.cards_line)
         box.addWidget(panel)
 
     def _device_name(self):
@@ -979,7 +1078,30 @@ class App(QMainWindow):
             text = QVBoxLayout()
             text.setSpacing(theme.SPACE[0])
             text.addWidget(label(tool["label"], "rowtitle", frame))
-            text.addWidget(label(tool["tip"], "caption", frame))
+            tip = label(tool["tip"], "caption", frame)
+            tip.setWordWrap(True)
+            text.addWidget(tip)
+            # The numbers that used to be fixed in the tool body. Editing
+            # one changes how long the run takes, which the progress bar
+            # then reflects — the duration is read at Run, not baked in.
+            #
+            # They go *under* the tip rather than beside the Run button:
+            # inline, two of them (thermal monitor's samples and interval)
+            # pushed the row past its grid column and clipped the whole
+            # right-hand column of the pane.
+            params = navigation.params_for(tool)
+            if params:
+                param_row = QHBoxLayout()
+                param_row.setContentsMargins(0, theme.SPACE[2], 0, 0)
+                param_row.setSpacing(theme.SPACE[3])
+                for spec in params:
+                    param_row.addWidget(label(spec["label"], "caption", frame),
+                                        0, Qt.AlignVCenter)
+                    param_row.addWidget(
+                        self._tool_param_editor(tool, spec, frame), 0,
+                        Qt.AlignVCenter)
+                param_row.addStretch(1)
+                text.addLayout(param_row)
             row.addLayout(text, 1)
             run = QPushButton("Run", frame)
             run.setProperty("role",
@@ -993,6 +1115,26 @@ class App(QMainWindow):
         self.tool_detail = ToolDetail(self._request_cancel, parent)
         self.tool_detail.setVisible(False)
         box.addWidget(self.tool_detail)
+
+    def _tool_param_editor(self, tool, spec, parent):
+        """A compact spin box for one overridable tool parameter.
+
+        Bounds come from the spec and are enforced by the widget, so a run
+        cannot be started with a value the tool was never meant to take —
+        but everything inside them is the user's call.
+        """
+        editor = QDoubleSpinBox(parent)
+        editor.setDecimals(spec.get("decimals", 0))
+        editor.setRange(spec["min"], spec["max"])
+        editor.setSingleStep(spec["step"])
+        editor.setValue(spec["default"])
+        editor.setSuffix(" " + spec["unit"] if spec["unit"] != "x" else "")
+        editor.setFixedWidth(72)
+        editor.setToolTip("{} — {} to {}{}".format(
+            spec["label"], spec["min"], spec["max"],
+            " " + spec["unit"] if spec["unit"] != "x" else ""))
+        self.tool_param_widgets[(tool["key"], spec["key"])] = editor
+        return editor
 
     # ---- Fans ----
 
@@ -1141,14 +1283,13 @@ class App(QMainWindow):
                 item.widget().deleteLater()
         self.port_empty.setVisible(not ports)
         for index, port in enumerate(ports):
-            watts = ("{:.1f} W".format(port["watts"]) if port.get("watts")
-                     else "—")
+            live = port_is_live(port)
+            watts = "{:.1f} W".format(port["watts"]) if live else "—"
             detail = ("{:.1f} V {:.1f} A".format(port["volts"],
                                                  port["ma"] / 1000.0)
-                      if port.get("watts") else "no PD contract")
-            module = self._module_name(
-                module_icons.classify("usb-c" if port.get("watts") else ""),
-                port["port"])
+                      if live else "no PD contract")
+            module = port.get("name") or self._module_name(
+                module_icons.classify("usb-c" if live else ""), port["port"])
             if index:
                 self.port_rows.addWidget(rule())
             self.port_rows.addWidget(self._port_row((
@@ -1166,6 +1307,7 @@ class App(QMainWindow):
             box, parent, "Settings",
             "Only the controls this mainboard supports are shown. Detection "
             "failing shows everything rather than guessing.")
+        self._preset_panel(box, parent)
         panel = widgets.Panel(parent)
         # The rows carry their own vertical padding, so the panel adds none:
         # doubling them would stretch six rows past the fold.
@@ -1180,6 +1322,62 @@ class App(QMainWindow):
                 "No model-specific settings detected for this device.",
                 "caption", panel))
         box.addWidget(panel)
+
+    def _preset_panel(self, box, parent):
+        """Charge presets, on the pane whose rows they overwrite.
+
+        These used to sit in Diagnostics, which put a control that rewrites
+        two Settings rows in a different section entirely — you ran it over
+        there and nothing over here moved. Now they are directly above the
+        rows they set, and applying one fills those editors in as well as
+        writing the values, so the effect is visible where it happened.
+        """
+        presets = navigation.presets_for(self.caps)
+        if not presets:
+            return
+        panel = widgets.Panel(parent)
+        header = QHBoxLayout()
+        header.addWidget(section_label("Presets", panel))
+        header.addStretch(1)
+        header.addWidget(label("Writes the charge rows below", "caption",
+                               panel))
+        panel.body.addLayout(header)
+        row = QHBoxLayout()
+        row.setSpacing(theme.SPACE[4])
+        for preset in presets:
+            frame = QFrame(panel)
+            frame.setObjectName("inset")
+            inner = QHBoxLayout(frame)
+            inner.setContentsMargins(11, 9, 11, 9)
+            inner.setSpacing(theme.SPACE[4])
+            text = QVBoxLayout()
+            text.setSpacing(theme.SPACE[0])
+            text.addWidget(label(preset["label"], "rowtitle", frame))
+            text.addWidget(label(preset["tip"], "caption", frame))
+            inner.addLayout(text, 1)
+            apply_button = QPushButton("Apply", frame)
+            apply_button.setProperty("role", "accent")
+            apply_button.clicked.connect(
+                lambda _=False, p=preset: self._apply_preset(p))
+            inner.addWidget(apply_button, 0, Qt.AlignVCenter)
+            row.addWidget(frame, 1)
+        panel.body.addLayout(row)
+        box.addWidget(panel)
+
+    def _apply_preset(self, preset):
+        """Write a preset's values, and show them in the rows they landed in."""
+        # Same reason as _start_tool: fill the editors only once there is
+        # going to be a command, or a click during a running tool would show
+        # values that were never written.
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        values = preset["sets"]
+        for key, value in values.items():
+            self._on_fill(key, value)
+        limit = values.get("charge_limit", "80")
+        rate = values.get("charge_rate", "1")
+        self.run_tool(lambda: self.tool_preset(limit, rate))
 
     def _settings_row(self, row, parent):
         frame = QWidget(parent)
@@ -1228,11 +1426,44 @@ class App(QMainWindow):
             get.clicked.connect(
                 lambda _=False, r=row: self._get_setting(r))
             layout.addWidget(get)
+        # Hand the setting back to the firmware in one click. Only rows
+        # whose setting really has an automatic mode get this — inventing an
+        # Auto for the keyboard backlight, which has none, would be a button
+        # that silently does nothing.
+        if row.get("auto"):
+            auto = QPushButton("Auto", frame)
+            auto.setProperty("role", "compact")
+            auto.setToolTip("Run: {}".format(" ".join(row["auto"])))
+            auto.clicked.connect(lambda _=False, r=row: self._auto_setting(r))
+            layout.addWidget(auto)
         setter = QPushButton("Set", frame)
         setter.setProperty("role", "danger" if row["danger"] else "accent")
         setter.clicked.connect(lambda _=False, r=row: self._set_setting(r))
         layout.addWidget(setter)
         return frame
+
+    def _auto_setting(self, row):
+        """Return one setting to automatic, then re-read it if it can be."""
+        args = list(row["auto"])
+        if row["danger"] and not self._confirm_command(
+                "Auto {}".format(row["label"]), args,
+                "Hands the input deck back to automatic control."):
+            return
+        self.run_tool(lambda: self._auto_setting_worker(row, args))
+
+    def _auto_setting_worker(self, row, args):
+        rc, out = self._exec(args)
+        self._append(out.strip() + "\n" if out.strip()
+                     else "{} → auto (exit {})\n".format(row["label"], rc))
+        if rc != 0:
+            return
+        if row["get"]:
+            # Re-read rather than assume: the firmware decides what "auto"
+            # resolves to, and for the brightness row that is a percentage
+            # this app has no way to predict.
+            self._get_setting_worker(row, list(row["get"]))
+        elif row["kind"] == "choice":
+            self.sig_fill.emit(row["key"], "auto")
 
     def _editor_value(self, key):
         editor = self.settings_widgets.get(key)
@@ -1244,11 +1475,24 @@ class App(QMainWindow):
         args = list(row["get"])
         self.run_tool(lambda: self._get_setting_worker(row, args))
 
+    # A settings read is parsed by the reader its row names, because
+    # framework_tool prints more than one number in some of these blocks and
+    # the generic reader picked the wrong one: "Minimum 0%, Maximum 80%"
+    # reported every machine as limited to 0%, and the fingerprint block's
+    # level never reached the combo box at all.
+    SETTING_PARSERS = {
+        "charge_limit": parse_charge_limit,
+        "fp_level": parse_fp_level,
+        "fp_brightness": parse_fp_brightness,
+    }
+
     def _get_setting_worker(self, row, args):
         rc, out = self._exec(args)
         self._append(out.strip() + "\n")
         if rc == 0:
-            value = parse_setting_value(out)
+            reader = self.SETTING_PARSERS.get(row.get("parse"),
+                                              parse_setting_value)
+            value = reader(out)
             if value:
                 self.sig_fill.emit(row["key"], value)
 
@@ -1414,7 +1658,7 @@ class App(QMainWindow):
         if icon_token:
             icon = QLabel(frame)
             icon.setPixmap(widgets.stroke_pixmap(
-                ("M8 1.5 15 14H1z", "M8 6v4", "M8 11.8v.4"),
+                ("M8 1.5L15 14H1z", "M8 6v4", "M8 11.8v.4"),
                 colour(icon_token), 14))
             row.addWidget(icon, 0, Qt.AlignTop)
         body = label(text, role, frame)
@@ -1769,7 +2013,13 @@ class App(QMainWindow):
             body = deps.fetch_text(deps.github_latest_api(plan["repo"]),
                                    timeout=30)
             release = json.loads(body)
-            asset = deps.pick_asset(release.get("assets"), plan["asset_match"])
+            binary = plan.get("binary")
+            # `binary` is what breaks a tie between assets that both match
+            # the substring — the RyzenAdj release ships ryzenadj-win64.zip
+            # (the CLI) and libryzenadj-win64.zip (the library, no exe), and
+            # without it the library won and the unpack found no ryzenadj.exe.
+            asset = deps.pick_asset(release.get("assets"),
+                                    plan["asset_match"], binary)
             if not asset:
                 raise RuntimeError(
                     "No asset matching '{}' in {}".format(
@@ -1781,20 +2031,46 @@ class App(QMainWindow):
                 asset["browser_download_url"], dest,
                 progress=self._download_progress)
             self._append("Downloaded to {}\n".format(archive))
+            extracted = False
             if archive.lower().endswith(".zip"):
                 deps.extract_zip(archive, dest)
+                extracted = True
                 self._append("Unpacked into {}\n".format(dest))
-            binary = plan.get("binary")
+            elif deps.is_archive(archive):
+                # Only zips are unpacked here. Saying so beats handing a
+                # tarball to zipfile and reporting its error as a failed
+                # download.
+                self._append("Downloaded, but {} is not a zip — unpack it "
+                             "yourself.\n".format(os.path.basename(archive)))
             found = deps.find_in_tree(dest, binary) if binary else None
             self._append("{} is at {}\n".format(dep["name"], found) if found
                          else "Unpacked, but {} was not found in {}.\n".format(
                              binary, dest))
+            if extracted:
+                self._cleanup_downloads(dest)
         except Exception as e:  # noqa: BLE001
             # Any failure ends the same way: hand over the page and let the
             # user do it by hand, rather than leaving them stuck.
             self._append("Automatic download failed: {}\n\n"
                          "Open {} and install it manually.\n".format(
                              e, dep["homepage"]))
+
+    def _cleanup_downloads(self, dest):
+        """Delete the spent archives once the unpack has succeeded.
+
+        Only archives — the DLLs beside ryzenadj.exe are what let it reach
+        the SoC, so tidying the unpacked tree would break the tool this just
+        installed. A file the OS will not release is reported and skipped:
+        a failed tidy-up must not turn a successful install into an error.
+        """
+        removed, failed = deps.cleanup(dest)
+        if removed:
+            self._append("Cleaned up: {}\n".format(", ".join(removed)))
+        if failed:
+            self._append("Could not remove (in use?): {}\n".format(
+                ", ".join(failed)))
+        if not removed and not failed:
+            self._append("Nothing to clean up.\n")
 
     def _download_progress(self, done, total):
         if total:
@@ -1925,26 +2201,96 @@ class App(QMainWindow):
             return
         self.run_tool(self._readings_worker)
 
+    def _read_into(self, readings, key, args):
+        """Run one reading command, log what it said, and keep it if it worked.
+
+        The logging is the point. These commands used to run silently — the
+        drawer showed four bare `$` lines and nothing else — so when a
+        reading came back empty there was no way to tell whether the command
+        had failed, printed something unexpected, or printed nothing at all.
+        Everything else in the app echoes its output; these now do too.
+        """
+        rc, out = self._exec(args)
+        body = (out or "").strip()
+        self._log("framework_tool", (body or "(no output)") + "\n",
+                  "output" if rc == 0 else "warn")
+        if rc != 0:
+            return None
+        readings[key] = out
+        return out
+
+    def _read_ports(self, readings):
+        """Read the USB-C bays, falling back to the generic EC command.
+
+        `--pdports` uses a Framework-specific EC command that not every EC
+        firmware implements. Where it is missing the CLI still *exits 0*,
+        having printed only errors — so the app saw a successful command,
+        parsed zero ports out of it, and left every bay reading "not read"
+        with no indication why.
+
+        `--pdports-chromebook` asks the same question through the generic
+        Chromium EC path, which answers on boards the first does not. It
+        prints a different format; `parse_ports` reads both.
+        """
+        out = self._read_into(readings, "ports_raw", ["--pdports"])
+        ports = parse_ports(out or "")
+        readings["ports_source"] = "--pdports"
+        if not ports:
+            self._append("--pdports named no ports; trying "
+                         "--pdports-chromebook.\n")
+            out = self._read_into(readings, "ports_raw",
+                                  ["--pdports-chromebook"])
+            ports = parse_ports(out or "")
+            readings["ports_source"] = "--pdports-chromebook"
+        readings["ports"] = ports
+        if not ports:
+            self._append("Neither port command named a USB-C port on this "
+                         "board.\n")
+        return ports
+
+    # Cards framework_tool can name, and the string it names them with.
+    CARD_SIGNATURES = (
+        ("HDMI Expansion Card", "HDMI"),
+        ("DisplayPort Expansion Card", "DisplayPort"),
+        ("Audio Expansion Card", "Audio"),
+    )
+
+    def _read_cards(self, readings):
+        """Name the expansion cards the CLI can identify at all.
+
+        `--pdports` only reports whether a bay negotiated power, which
+        infers USB-C and nothing else. `--dp-hdmi-info` and
+        `--audio-card-info` do identify a card by name — but neither says
+        which bay it is in, and upstream is explicit about why: the HID API
+        it goes through abstracts away the USB topology, so the port is not
+        knowable.
+
+        So these are reported as "present on this machine", not placed in a
+        bay. Putting an HDMI card in a particular row would be a guess, and
+        the rule here has always been that an unidentified bay gets the
+        neutral mark rather than a plausible-looking wrong answer.
+        """
+        found = []
+        for key, args in (("dp_hdmi", ["--dp-hdmi-info"]),
+                          ("audio", ["--audio-card-info"])):
+            out = self._read_into(readings, key + "_raw", args) or ""
+            for signature, name in self.CARD_SIGNATURES:
+                if signature.lower() in out.lower() and name not in found:
+                    found.append(name)
+        readings["cards"] = found
+        return found
+
     def _readings_worker(self):
         self._append("=== Reading sensors ===\n")
         readings = {}
         if self.caps.get("is_laptop"):
-            rc, out = self._exec(["--power", "-vv"])
-            if rc == 0:
-                readings["power"] = out
-            rc, out = self._exec(["--charge-limit"])
-            if rc == 0:
-                readings["charge_limit"] = out
-        rc, out = self._exec(["--thermal"])
-        if rc == 0:
-            readings["thermal"] = out
-        rc, out = self._exec(["--pdports"])
-        if rc == 0:
-            readings["ports"] = parse_ports(out)
+            self._read_into(readings, "power", ["--power", "-vv"])
+            self._read_into(readings, "charge_limit", ["--charge-limit"])
+        self._read_into(readings, "thermal", ["--thermal"])
+        self._read_ports(readings)
+        self._read_cards(readings)
         if self.caps.get("has_expansion_bay"):
-            rc, out = self._exec(["--expansion-bay"])
-            if rc == 0:
-                readings["expansion_bay"] = out
+            self._read_into(readings, "expansion_bay", ["--expansion-bay"])
         self.sig_readings.emit(readings)
 
     def _apply_readings(self, readings):
@@ -1977,9 +2323,12 @@ class App(QMainWindow):
         self.stat_cards["cpu"].set_value(self._cpu_temp(temps))
         self.stat_cards["fan"].set_value(
             "{} RPM".format(rpm.group(1)) if rpm else "—")
+        # parse_charge_limit, not the generic reader: --charge-limit prints
+        # "Minimum 0%, Maximum 80%" and the generic one took the 0, so this
+        # card reported every machine as limited to 0%.
+        limit = parse_charge_limit(self.readings.get("charge_limit", ""))
         self.stat_cards["charge_limit"].set_value(
-            parse_setting_value(self.readings.get("charge_limit", "")) + "%"
-            if self.readings.get("charge_limit") else "—")
+            limit + "%" if limit else "—")
         self.stat_cards["ac"].set_value(self._ac_summary(ac, power_text))
         self.stat_cards["cycles"].set_value(
             cycles.group(1) if cycles else "—")
@@ -2001,9 +2350,20 @@ class App(QMainWindow):
 
     @staticmethod
     def _ac_summary(ac, power_text):
+        """The AC input card: measured watts, but only when there is AC.
+
+        The charger voltage and input current are reported whether or not an
+        adapter is attached, and they are not zero on battery — multiplying
+        them unconditionally showed a few watts of AC draw on an unplugged
+        machine. The adapter state decides first; the arithmetic only runs
+        when it says there is something to measure.
+        """
+        connected = ac_connected(power_text)
+        if connected is False:
+            return "on battery"
         volts = RE_CHG_V.search(power_text)
         amps = RE_IN_A.search(power_text)
-        if volts and amps:
+        if connected and volts and amps:
             return "{:.1f} W measured".format(
                 int(volts.group(1)) * int(amps.group(1)) / 1e6)
         return ac.group(1).strip() if ac else "—"
@@ -2023,45 +2383,79 @@ class App(QMainWindow):
                 "{} C".format(value), int(value) / TEMP_SCALE_C)
 
     def _fill_bays(self):
-        """Paint the four bay rows from what --pdports and friends reported.
+        """Paint the four bay rows from what the port commands reported.
 
-        framework_tool does not name the card in each bay on every board, so
-        the type is classified from whatever description we do have and
-        falls back to the neutral module mark. The row is still useful
-        without it: the role and negotiated wattage are the reading people
-        come here for.
+        framework_tool does not name the card in each bay on any board, so
+        the type is inferred from whether the bay carries power and
+        otherwise falls back to the neutral module mark. The row is still
+        useful without it: the role and negotiated wattage are the reading
+        people come here for.
+
+        A row reads "not read" only when no port command named that bay at
+        all — a bay the CLI *did* report but which is sitting idle says so,
+        which is a different fact and used to be indistinguishable.
         """
         ports = self.readings.get("ports") or []
-        hints = self.readings.get("module_hints") or {}
+        # Reshape the drawing for the detected chassis before colouring it:
+        # a Laptop 16 has six slots and is wider than a 12, and the diagram
+        # is a legend for these rows, so it has to be the right machine.
+        self.chassis.set_chassis(
+            device_images.chassis_for(self.caps.get("model", "")))
         states = []
         for index, (icon, name, detail) in enumerate(self.module_rows):
             port = ports[index] if index < len(ports) else None
             if port is None:
                 states.append("empty")
                 icon.set_module(module_icons.UNKNOWN, token="icon")
+                name.setText("Port {}".format(index + 1))
                 detail.setText("not read")
                 continue
             role = (port.get("role") or "?").lower()
             watts = port.get("watts")
-            if watts and role == "sink":
+            live = port_is_live(port)
+            if live and role == "sink":
                 state, token = "sink", "accent.bright"
-            elif watts:
+            elif live:
                 state, token = "source", "ok.bar"
             else:
                 state, token = "idle", "warn"
             states.append(state)
-            # A bay that negotiated a PD contract has a USB-C card in it:
-            # an HDMI or microSD card never negotiates one. That is the only
-            # module identity --pdports actually supports, so it is the only
-            # one inferred here; `module_hints` is where a real per-bay
-            # identification would feed in once the CLI reports one.
-            hint = hints.get(str(port["port"])) or ("usb-c" if watts else "")
+            # A bay carrying a PD contract has a USB-C card in it: an HDMI
+            # or microSD card never negotiates one. That is the only per-bay
+            # module identity either port command supports, so it is the
+            # only one inferred here.
+            hint = "usb-c" if live else ""
             module_type = module_icons.classify(hint)
             icon.set_module(module_type, module_icons.capacity(hint), token)
-            name.setText(self._module_name(module_type, port["port"]))
+            name.setText(port.get("name")
+                         or self._module_name(module_type, port["port"]))
             detail.setText("{}{}".format(
-                role, " · {:.1f} W".format(watts) if watts else " · idle"))
+                role, " · {:.1f} W".format(watts) if live else " · idle"))
         self.chassis.set_states(states)
+        source = self.readings.get("ports_source")
+        if source and hasattr(self, "bay_source"):
+            self.bay_source.setText(
+                "negotiated power from {}, in CLI port order".format(source))
+        self._fill_cards()
+
+    def _fill_cards(self):
+        """The 'also present' line under the bays.
+
+        DP/HDMI and Audio cards are identifiable but not locatable — the CLI
+        cannot say which bay one is in — so they are listed here rather than
+        being dropped into a row that would then be a guess.
+        """
+        if not hasattr(self, "cards_line"):
+            return
+        cards = self.readings.get("cards")
+        if cards is None:
+            self.cards_line.setVisible(False)
+            return
+        self.cards_line.setVisible(True)
+        self.cards_line.setText(
+            "Also fitted: {} · the CLI cannot say which bay".format(
+                " · ".join(cards)) if cards
+            else "No DP/HDMI or Audio card reported")
 
     @staticmethod
     def _module_name(module_type, port):
@@ -2200,23 +2594,59 @@ class App(QMainWindow):
                 self._start_tool(tool)
                 return
 
+    def _param(self, key, fallback):
+        """One parameter of the tool currently running.
+
+        Worker threads call this; the values were read off the editors on
+        the UI thread at Run and frozen into `_tool_values`, so no worker
+        ever reaches into a widget — the same rule every other worker here
+        follows.
+        """
+        return getattr(self, "_tool_values", {}).get(key, fallback)
+
+    def tool_params(self, tool):
+        """This tool's overridable numbers, read back from its editors.
+
+        Falls back to the declared defaults for anything with no editor on
+        screen, so a tool started before its pane was built still runs.
+        """
+        values = navigation.defaults_for(tool)
+        for spec in navigation.params_for(tool):
+            editor = self.tool_param_widgets.get((tool["key"], spec["key"]))
+            if editor is not None:
+                values[spec["key"]] = navigation.clamp_param(
+                    spec, editor.value())
+        return values
+
     def _start_tool(self, tool):
         method = getattr(self, "tool_" + tool["key"], None)
         if method is None:
-            method = {
-                "preset_longevity": lambda: self.tool_preset(80, "0.8"),
-                "preset_full": lambda: self.tool_preset(100, "1"),
-            }.get(tool["key"])
-        if method is None:
             return
+        # Ask before touching anything. `run_tool` also refuses while busy,
+        # but by then this method has already marked the row as running,
+        # shown the detail panel and started the spinner and the progress
+        # bar — and since no worker starts, nothing ever emits sig_tool_done
+        # to put them back. Clicking Run on a second tool left the first
+        # row lit up and the bar animating for the rest of the session.
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        params = self.tool_params(tool)
+        duration = navigation.duration_for(tool, params)
         if tool.get("danger") and not self._confirm_command(
                 tool["label"], self._build_cmd(["--fansetduty", "100"]),
-                "Runs the fan at full duty for 30 seconds, then restores "
-                "automatic control."):
+                "Runs the fan at full duty for {:.0f} seconds, then restores "
+                "automatic control.".format(duration or 30)):
             return
         self._current_tool = tool
-        if tool["steps"]:
-            self.tool_detail.begin(tool["label"], tool["steps"])
+        self._tool_values = params
+        mode = tool.get("mode")
+        if mode == navigation.MODE_BAR and duration > 0:
+            self.tool_detail.begin(tool["label"], tool["steps"],
+                                   navigation.MODE_BAR, duration)
+        elif mode == navigation.MODE_STEPS and tool["steps"]:
+            self.tool_detail.begin(tool["label"], tool["steps"],
+                                   navigation.MODE_STEPS)
         else:
             self.tool_detail.setVisible(False)
         frame = self.tool_rows.get(tool["key"])
@@ -2247,7 +2677,7 @@ class App(QMainWindow):
         self.set_status("Tool finished." if not self._cancel
                         else "Tool cancelled.")
         if hasattr(self, "tool_detail"):
-            self.tool_detail.finish()
+            self.tool_detail.finish(cancelled=self._cancel)
         current = getattr(self, "_current_tool", None)
         if current:
             frame = self.tool_rows.get(current["key"])
@@ -2343,26 +2773,34 @@ class App(QMainWindow):
             self._append("Battery SoC: {}%\n".format(soc.group(1)))
         if rc2 == 0:
             for p in parse_ports(pdout):
-                if p.get("watts") and p["role"] == "Sink":
+                if port_is_live(p) and p["role"].lower() == "sink":
                     self._append(
                         "Port {}: adapter contract {:.1f} V × {} mA = "
                         "{:.1f} W max\n".format(p["port"], p["volts"], p["ma"],
                                                 p["watts"]))
-        if v and inp:
+        # Same rule as the Overview's AC card: the charger registers read
+        # non-zero on battery, so a wattage derived from them is meaningless
+        # unless an adapter is actually attached.
+        connected = ac_connected(power_text)
+        if connected is False:
+            self._append("On battery — no AC input to measure.\n")
+        elif v and inp:
             est = int(v.group(1)) * int(inp.group(1)) / 1e6
             self._append("Measured input draw (est.): {:.1f} W "
                          "({} mV × {} mA)\n".format(est, v.group(1),
                                                     inp.group(1)))
-        if v and chg:
+        if connected is not False and v and chg:
             bw = int(v.group(1)) * int(chg.group(1)) / 1e6
             self._append("Battery charge power: {:.1f} W\n".format(bw))
-        if not (v and (inp or chg)):
+        if connected is not False and not (v and (inp or chg)):
             self._append("Could not parse charger values — raw output:\n"
                          + power_text + "\n")
 
     def tool_fan_test(self):
+        dwell = self._param("dwell", 8)
         self._append("=== Fan speed test (0→100% duty) ===\n"
-                     "Each step: set duty, wait 8 s for spin-up, read RPM.\n\n")
+                     "Each step: set duty, wait {:g} s for spin-up, read "
+                     "RPM.\n\n".format(dwell))
         results = []
         duties = (0, 25, 50, 75, 100)
         try:
@@ -2376,7 +2814,7 @@ class App(QMainWindow):
                 self._append("Duty {:3d}% … ".format(duty))
                 self._progress(index, index + 1, len(duties),
                                "{}%".format(duty), "…", 0)
-                if not self._sleep(8):
+                if not self._sleep(dwell):
                     self._append("cancelled\n")
                     break
                 rc, out = self._exec(["--thermal"])
@@ -2401,18 +2839,31 @@ class App(QMainWindow):
                              "faulty/absent.\n")
 
     def tool_fan_burst(self):
-        self._append("=== Fan max burst ===\nFull duty for 30 s, then auto.\n")
+        """Full fan duty for a set time, then hand control back.
+
+        The wait is one uninterrupted stretch now rather than six five-second
+        hops. The progress bar is driven by the clock on the UI side, so
+        this loop exists only to stay cancellable and to log the countdown —
+        it no longer has to pretend the burst has stages.
+        """
+        duration = self._param("duration", 30)
+        self._append("=== Fan max burst ===\n"
+                     "Full duty for {:g} s, then auto.\n".format(duration))
         rc, out = self._exec(["--fansetduty", "100"])
         if rc != 0:
             self._append(out + "\n")
             return
         try:
-            for index, remaining in enumerate(range(30, 0, -5)):
-                self._append("{} s…\n".format(remaining))
-                self._progress(index, index + 1, 6, "remaining",
-                               "{} s".format(remaining), 1 - remaining / 30.0)
-                if not self._sleep(5):
+            remaining = float(duration)
+            while remaining > 0 and not self._cancel:
+                self._progress(0, 1, 1, "full duty",
+                               "{:.0f} s left".format(remaining),
+                               1 - remaining / float(duration))
+                slice_s = min(self.BURST_LOG_INTERVAL, remaining)
+                if not self._sleep(slice_s):
                     break
+                remaining -= slice_s
+                self._append("{:.0f} s…\n".format(remaining))
         finally:
             self._exec(["--autofanctrl"])
             self._append("Automatic fan control restored.\n")
@@ -2468,17 +2919,20 @@ class App(QMainWindow):
             self._append("Could not parse — raw output:\n" + out + "\n")
 
     def tool_thermal_monitor(self):
-        self._append("=== Thermal monitor (6 samples, 5 s apart) ===\n")
+        samples = int(self._param("samples", 6))
+        interval = self._param("interval", 5)
+        self._append("=== Thermal monitor ({} samples, {:g} s apart) ==="
+                     "\n".format(samples, interval))
         stats = {}
         rpm_seen = []
-        for i in range(6):
+        for i in range(samples):
             if self._cancel:
                 break
             rc, out = self._exec(["--thermal"])
             if rc != 0:
                 self._append(out + "\n")
                 return
-            line = ["[{}/6]".format(i + 1)]
+            line = ["[{}/{}]".format(i + 1, samples)]
             hottest = 0
             for name, val in RE_TEMP.findall(out):
                 v = int(val)
@@ -2491,9 +2945,9 @@ class App(QMainWindow):
                 rpm_seen.append(int(m.group(1)))
                 line.append("fan={}rpm".format(m.group(1)))
             self._append(" ".join(line) + "\n")
-            self._progress(i, i + 1, 6, "sample {}".format(i + 1),
+            self._progress(i, i + 1, samples, "sample {}".format(i + 1),
                            "{} C".format(hottest), hottest / TEMP_SCALE_C)
-            if i < 5 and not self._sleep(5):
+            if i < samples - 1 and not self._sleep(interval):
                 break
         self._append("\nSummary (min–max):\n")
         for name, (lo, hi) in stats.items():
@@ -2503,28 +2957,44 @@ class App(QMainWindow):
                                                      max(rpm_seen)))
 
     def tool_port_map(self):
+        """Per-port power summary, over whichever port command answers.
+
+        Same two-command fallback the Overview scan uses: `--pdports` first,
+        the generic `--pdports-chromebook` when it names nothing, because on
+        an EC without the Framework-specific command the first one exits 0
+        having printed only errors.
+        """
         self._append("=== Port power map ===\n")
-        rc, out = self._exec(["--pdports"])
-        if rc != 0:
-            self._append(out + "\n")
-            return
-        ports = parse_ports(out)
+        ports, out = [], ""
+        for args in (["--pdports"], ["--pdports-chromebook"]):
+            rc, out = self._exec(args)
+            self._append(out.strip() + "\n" if out.strip() else "(no output)\n")
+            if rc == 0:
+                ports = parse_ports(out)
+            if ports:
+                break
+            self._append("{} named no ports.\n".format(args[0]))
         if not ports:
-            self._append("No ports parsed — raw output:\n" + out + "\n")
+            self._append("Neither port command named a USB-C port on this "
+                         "board.\n")
             return
         self.sig_readings.emit({"ports": ports})
         for p in ports:
-            if p.get("watts"):
-                direction = "drawing" if p["role"] == "Sink" else "supplying"
-                self._append("Port {}: {:6s} {} {:.1f} W "
+            title = "Port {}{}".format(
+                p["port"], " ({})".format(p["name"]) if p.get("name") else "")
+            if port_is_live(p):
+                direction = ("drawing" if p["role"].lower() == "sink"
+                             else "supplying")
+                self._append("{}: {:6s} {} {:.1f} W "
                              "({:.1f} V / {} mA)\n".format(
-                                 p["port"], p["role"], direction, p["watts"],
+                                 title, p["role"], direction, p["watts"],
                                  p["volts"], p["ma"]))
             else:
-                self._append("Port {}: {:6s} no PD contract / nothing "
-                             "negotiated\n".format(p["port"], p["role"]))
+                self._append("{}: {:6s} no PD contract / nothing "
+                             "negotiated\n".format(title, p["role"]))
 
     def tool_kblight_sweep(self):
+        dwell = self._param("dwell", 0.5)
         self._append("=== Keyboard backlight sweep ===\n")
         rc, out = self._exec(["--kblight"])
         m = re.search(r"(\d+)\s*%", out) if rc == 0 else None
@@ -2538,13 +3008,14 @@ class App(QMainWindow):
                 self._append("{}% ".format(lv))
                 self._progress(index, index + 1, len(levels), "step",
                                "{}%".format(lv), lv / 100.0)
-                if not self._sleep(0.5):
+                if not self._sleep(dwell):
                     break
         finally:
             self._exec(["--kblight", original])
             self._append("\nRestored to {}%.\n".format(original))
 
     def tool_fpled_cycle(self):
+        dwell = self._param("dwell", 1.5)
         self._append("=== Fingerprint LED test ===\n"
                      "Watch the power button while levels cycle.\n")
         levels = ("high", "medium", "low", "ultra-low")
@@ -2556,7 +3027,7 @@ class App(QMainWindow):
                 self._append("{} ".format(level))
                 self._progress(index, index + 1, len(levels), "level", level,
                                (index + 1) / len(levels))
-                if not self._sleep(1.5):
+                if not self._sleep(dwell):
                     break
         finally:
             self._exec(["--fp-led-level", "auto"])
@@ -2638,10 +3109,27 @@ class App(QMainWindow):
             self._append("Verify: " + out.strip() + "\n")
 
 
+def load_app_icon():
+    """The window/taskbar icon, or an empty QIcon if the build lacks it.
+
+    Every shipped size is added to one QIcon so Qt picks a resolution rather
+    than resampling a single bitmap down to a 16px titlebar mark. A build
+    with no icons falls back to Qt's default: a missing decoration must
+    never be the reason the app does not start.
+    """
+    icon = QIcon()
+    for path in app_icon.png_paths():
+        icon.addFile(path)
+    return icon
+
+
 def main():
     QGuiApplication.setDesktopFileName("io.github.frameworkgui.FrameworkGUI")
     app = QApplication(sys.argv)
     app.setApplicationName(navigation.APP_NAME)
+    icon = load_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     load_fonts()
     window = App()
     window.show()

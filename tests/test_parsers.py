@@ -21,11 +21,16 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from parsers import (  # noqa: E402
+    ac_connected,
     detect_model,
+    parse_charge_limit,
     parse_firmware,
+    parse_fp_brightness,
+    parse_fp_level,
     parse_ports,
     parse_setting_value,
     parse_tool_version,
+    port_is_live,
     sections,
 )
 
@@ -381,3 +386,145 @@ class TestSettingValue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# `--pdports-chromebook`: the generic Chromium EC path, used when the
+# Framework-specific command the app asks for first is not implemented by
+# this EC firmware. Different header, different keys, no "Negotiated:" line.
+PDPORTS_CHROMEBOOK = """USB-C Port 0 (Right Back):
+  Role:          Sink
+  Charging Type: PD
+  Voltage Now:   20.000 V, Max: 20.000 V
+  Current Lim:   5000 mA, Max: 5000 mA
+  Dual Role:     DRP
+  Max Power:     100.0 W
+USB-C Port 1 (Right Front):
+  Role:          Disconnected
+  Charging Type: None
+  Voltage Now:   0.0 V, Max: 0.0 V
+  Current Lim:   0 mA, Max: 0 mA
+  Dual Role:     Charger
+  Max Power:     0.0 W
+"""
+
+# What --pdports actually prints on an EC without the command: it still
+# exits 0, having named no port at all. This is why the app falls back.
+PDPORTS_UNSUPPORTED = """Failed to send host command
+EC returned error: InvalidCommand
+"""
+
+
+class TestPortsChromebookFormat(unittest.TestCase):
+    """The second port format has to parse, or the fallback buys nothing."""
+
+    def test_ports_and_bay_names_are_read(self):
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertEqual([p["port"] for p in ports], ["0", "1"])
+        self.assertEqual(ports[0]["name"], "Right Back")
+        self.assertEqual(ports[1]["name"], "Right Front")
+
+    def test_role_is_not_confused_with_data_or_dual_role(self):
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertEqual(ports[0]["role"], "Sink")
+        self.assertEqual(ports[1]["role"], "Disconnected")
+
+    def test_watts_are_derived_from_voltage_and_current(self):
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertAlmostEqual(ports[0]["watts"], 100.0)
+        self.assertAlmostEqual(ports[0]["volts"], 20.0)
+        self.assertEqual(ports[0]["ma"], 5000)
+
+    def test_max_power_is_kept_apart_from_negotiated_power(self):
+        # The ceiling is not the contract; showing it as one would overstate
+        # what an idle port is delivering.
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertEqual(ports[0]["max_watts"], 100.0)
+        self.assertNotIn("watts", ports[1])
+
+    def test_a_disconnected_port_is_not_live(self):
+        ports = parse_ports(PDPORTS_CHROMEBOOK)
+        self.assertTrue(port_is_live(ports[0]))
+        self.assertFalse(port_is_live(ports[1]))
+
+    def test_the_original_format_still_parses(self):
+        ports = parse_ports(PDPORTS)
+        self.assertEqual([p["port"] for p in ports], ["0", "1", "3"])
+        self.assertAlmostEqual(ports[0]["watts"], 240.0)
+        self.assertTrue(port_is_live(ports[0]))
+        self.assertFalse(port_is_live(ports[2]))   # no Negotiated line
+
+    def test_an_unsupported_command_names_no_ports(self):
+        # Exits 0 and prints errors — the app must see "nothing here" and
+        # move on to the fallback rather than treat it as a successful read.
+        self.assertEqual(parse_ports(PDPORTS_UNSUPPORTED), [])
+
+    def test_port_is_live_tolerates_junk(self):
+        self.assertFalse(port_is_live(None))
+        self.assertFalse(port_is_live({}))
+
+
+class TestChargeLimit(unittest.TestCase):
+    """--charge-limit prints two percentages and the app means the second."""
+
+    def test_the_maximum_is_the_charge_limit(self):
+        self.assertEqual(parse_charge_limit("Minimum 0%, Maximum 80%"), "80")
+
+    def test_a_full_charge_limit_is_not_reported_as_zero(self):
+        # The bug this exists for: the generic reader took the first
+        # percentage, so a machine limited to 100% displayed "0%".
+        self.assertEqual(parse_charge_limit("Minimum 0%, Maximum 100%"),
+                         "100")
+
+    def test_an_unexpected_shape_falls_back_rather_than_fail(self):
+        self.assertEqual(parse_charge_limit("Charge limit: 75%"), "75")
+
+    def test_nothing_parseable_is_empty(self):
+        self.assertEqual(parse_charge_limit(""), "")
+
+
+FP_BLOCK = """Fingerprint LED Brightness
+  Requested:  UltraLow
+  Brightness: 55%
+"""
+FP_AUTO = """Fingerprint LED Brightness
+  Requested:  Auto
+  Brightness: 100%
+"""
+
+
+class TestFingerprintLed(unittest.TestCase):
+    """Both fingerprint reads print a level *and* a percentage."""
+
+    def test_the_level_comes_back_as_the_cli_spells_it(self):
+        # The CLI prints the Rust enum name; it accepts the kebab-case form,
+        # and the combo box lists what it accepts.
+        self.assertEqual(parse_fp_level(FP_BLOCK), "ultra-low")
+
+    def test_auto_is_read_back(self):
+        self.assertEqual(parse_fp_level(FP_AUTO), "auto")
+
+    def test_the_percentage_is_read_separately(self):
+        self.assertEqual(parse_fp_brightness(FP_BLOCK), "55")
+        self.assertEqual(parse_fp_brightness(FP_AUTO), "100")
+
+    def test_nothing_parseable_is_empty(self):
+        self.assertEqual(parse_fp_level("no such block"), "")
+        self.assertEqual(parse_fp_brightness("no such block"), "")
+
+
+class TestAcConnected(unittest.TestCase):
+    """The charger registers read non-zero on battery, so ask first."""
+
+    def test_connected(self):
+        self.assertIs(ac_connected("  AC is:            connected"), True)
+
+    def test_not_connected(self):
+        self.assertIs(ac_connected("  AC is:            not connected"),
+                      False)
+
+    def test_unstated_is_none(self):
+        # None, not False: "it did not say" is not "there is no adapter".
+        self.assertIsNone(ac_connected("Fan Speed: 0 RPM"))
+
+    def test_the_sample_output_is_connected(self):
+        self.assertIs(ac_connected(POWER_VV), True)

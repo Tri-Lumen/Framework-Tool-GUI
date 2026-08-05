@@ -63,6 +63,14 @@ DEPENDENCIES = (
         # Asset names change between releases, so the release is resolved at
         # runtime through the GitHub API and matched on a substring instead
         # of hardcoding a filename that will rot.
+        #
+        # "win64" alone is ambiguous: the release carries both
+        # `ryzenadj-win64.zip` (the CLI) and `libryzenadj-win64.zip` (the
+        # library — DLL, .lib and header, no ryzenadj.exe at all). The
+        # matcher used to take whichever came first, which was the library,
+        # so the download "succeeded" and then reported that ryzenadj.exe
+        # was nowhere in the tools directory. `binary` is what breaks the
+        # tie — see pick_asset.
         "windows": {"kind": KIND_DOWNLOAD, "repo": "FlyGoat/RyzenAdj",
                     "asset_match": "win64", "binary": "ryzenadj.exe"},
         "linux": {"kind": KIND_PACKAGE, "packages": {"yay": "ryzenadj",
@@ -197,21 +205,73 @@ def github_latest_api(repo):
     return f"https://api.github.com/repos/{repo}/releases/latest"
 
 
-def pick_asset(assets, match):
-    """Pick a release asset by case-insensitive substring, archives first.
+# Asset name fragments that mark a build which is *related to* the tool but
+# is not the tool: the library packaging, debug symbols, a source tarball.
+# Matched at the start of the name or after a - or _ so a legitimate asset
+# that merely contains the letters (…-libre-…) is not penalised.
+ASSET_PENALTY = ("lib", "debug", "symbols", "dev", "src", "source", "pdb")
+
+ARCHIVE_SUFFIXES = (".zip", ".7z", ".tar.gz", ".tgz", ".tar.xz")
+
+# Whole words only. A bare substring test marks `tool-win64-device.zip` as a
+# "dev" build and `my-devkit-win64.zip` too — the fragment has to be the
+# whole token, not merely inside one. `lib` is the exception and is matched
+# as a prefix as well, because that is how library packaging is named:
+# `libryzenadj-win64.zip`, no separator.
+_PENALTY_RE = re.compile(
+    r"(?:^|[-_.])(?:{})(?:$|[-_.])".format("|".join(ASSET_PENALTY)))
+
+
+def _penalised(name):
+    low = name.lower()
+    return bool(_PENALTY_RE.search(low)) or low.startswith("lib")
+
+
+def asset_score(name, match, binary=None):
+    """How well a release asset answers "the build containing `binary`".
+
+    Higher is better. Split out from pick_asset so the ranking is directly
+    testable — the RyzenAdj release is the case that matters, where two
+    assets match the substring and only one carries the executable.
+    """
+    low = (name or "").lower()
+    if match.lower() not in low:
+        return None
+    score = 0
+    if low.endswith(ARCHIVE_SUFFIXES):
+        score += 8
+    stem = (binary or "").rsplit(".", 1)[0].lower()
+    if stem:
+        if low.startswith(stem):
+            score += 4      # ryzenadj-win64.zip — this is the one
+        elif stem in low:
+            score += 1      # libryzenadj-win64.zip — related, not it
+    if _penalised(low):
+        score -= 6
+    return score
+
+
+def pick_asset(assets, match, binary=None):
+    """Pick a release asset by case-insensitive substring.
 
     `assets` is the GitHub API's asset list. Returns the asset dict or None;
     None means the caller should fall back to opening the releases page,
     which is what happens when upstream renames its artifacts.
+
+    `binary` is the executable the caller is actually after. Passing it is
+    what stops a release that ships both a library and a CLI under matching
+    names from handing back the library. Ties keep the API's own order, so
+    the choice is deterministic.
     """
-    named = [a for a in (assets or [])
-             if match.lower() in (a.get("name") or "").lower()]
-    if not named:
+    scored = []
+    for index, asset in enumerate(assets or []):
+        score = asset_score(asset.get("name") or "", match, binary)
+        if score is not None:
+            scored.append((-score, index, asset))
+    if not scored:
         return None
-    archives = [a for a in named
-                if (a.get("name") or "").lower().endswith((".zip", ".7z",
-                                                           ".tar.gz"))]
-    return (archives or named)[0]
+    scored.sort(key=lambda row: (row[0], row[1]))
+    return scored[0][2]
 
 
 def tools_dir(environ=None):
@@ -249,6 +309,58 @@ def extract_zip(archive_path, dest_dir):
         members = safe_members(zf.namelist())
         zf.extractall(dest_dir, members=members)
     return members
+
+
+# ---------- cleanup ----------
+#
+# Unpacking leaves the archive behind, and every reinstall drops another
+# one, so the tools directory accumulated a copy of every release ever
+# downloaded. The unpacked payload is what the app uses; the archive is
+# spent the moment extraction succeeds.
+#
+# Only the archives go. The DLLs beside ryzenadj.exe (WinRing0x64, inpoutx64)
+# are what let it talk to the SoC at all, so "tidying" the unpacked tree
+# would break the tool this just installed.
+
+def is_archive(path):
+    return (path or "").lower().endswith(ARCHIVE_SUFFIXES)
+
+
+def cleanup_targets(dest_dir, keep=(), lister=None, isfile=None):
+    """Archives in the tools directory that installing has finished with.
+
+    `keep` names files to spare. I/O is injected so the decision is
+    testable without a filesystem.
+    """
+    ls = lister or (lambda d: os.listdir(d) if os.path.isdir(d) else [])
+    isf = isfile or os.path.isfile
+    spared = {os.path.basename(k) for k in keep}
+    out = []
+    for name in sorted(ls(dest_dir)):
+        if name in spared or not is_archive(name):
+            continue
+        path = os.path.join(dest_dir, name)
+        if isf(path):
+            out.append(path)
+    return out
+
+
+def cleanup(dest_dir, keep=(), lister=None, isfile=None, remove=None):
+    """Delete spent archives. Returns (removed, failed) as name lists.
+
+    Never raises: a file the OS will not let go of is reported and skipped,
+    because a failed tidy-up must not turn a successful install into an
+    error.
+    """
+    rm = remove or os.remove
+    removed, failed = [], []
+    for path in cleanup_targets(dest_dir, keep, lister, isfile):
+        try:
+            rm(path)
+            removed.append(os.path.basename(path))
+        except OSError:
+            failed.append(os.path.basename(path))
+    return removed, failed
 
 
 # ---------- fetching ----------
