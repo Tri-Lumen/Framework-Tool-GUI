@@ -147,6 +147,48 @@ def short_cpu_label(label):
     return " ".join(text.split()).strip(" ,-")
 
 
+# ---------- manufacturer TDP limits ----------
+#
+# AMD publishes a configurable TDP (cTDP) range per chip — the min and max
+# wattage a laptop maker is allowed to configure it between — separate from
+# the "presets" further down, which used to be one hardcoded triple
+# (15/25/45 W) offered for every CPU regardless of what it actually
+# supports. A 7640U's own cTDP tops out at 30 W, so that 45 W preset was
+# asking for 50% more than AMD specifies for the chip.
+#
+# Intel's Core Ultra chips are deliberately not in this table: Intel
+# publishes PL1/PL2 defaults rather than a laptop-maker-configurable
+# min/max the way AMD does, which is too different a shape to fold into
+# the same three numbers without guessing. An unrecognised chip (every
+# Intel chip today, and any AMD chip not yet added) gets no
+# manufacturer-derived presets — free-text entry still works, bounded only
+# by MIN_WATTS/MAX_WATTS above, exactly as before this table existed.
+#
+# Most specific fragment first, same idiom as drivers.CATALOG /
+# device_images.CHASSIS: match against the lowercased short CPU label.
+CPU_TDP_LIMITS = (
+    {"match": ("7640u",), "min_w": 15, "default_w": 28, "max_w": 30},
+    {"match": ("7840u",), "min_w": 15, "default_w": 28, "max_w": 30},
+    {"match": ("7840hs",), "min_w": 35, "default_w": 45, "max_w": 54},
+    {"match": ("7940hs",), "min_w": 35, "default_w": 45, "max_w": 54},
+    {"match": ("hx 370", "hx370"), "min_w": 15, "default_w": 28, "max_w": 54},
+)
+
+
+def tdp_limits_for(cpu_label):
+    """AMD's published {min_w, default_w, max_w} for a detected CPU.
+
+    None for a chip not in the table — this never estimates a range for a
+    chip it hasn't been told the real numbers for.
+    """
+    text = (cpu_label or "").lower()
+    for entry in CPU_TDP_LIMITS:
+        if any(fragment in text for fragment in entry["match"]):
+            return {"min_w": entry["min_w"], "default_w": entry["default_w"],
+                    "max_w": entry["max_w"]}
+    return None
+
+
 # ---------- backend registry ----------
 
 BACKENDS = {

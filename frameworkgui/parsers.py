@@ -131,6 +131,29 @@ def parse_ports(text):
     return ports
 
 
+# Side/position words in a --pdports-chromebook bay name ("Right Back",
+# "Left Front"). Plain --pdports never names a bay at all, so this has to
+# fail closed on missing or unrecognised text rather than guess.
+RE_BAY_SIDE = re.compile(r"\bleft\b|\bright\b", re.IGNORECASE)
+RE_BAY_POSITION = re.compile(r"\bback\b|\bfront\b", re.IGNORECASE)
+
+
+def bay_orientation(name):
+    """("left"/"right", "back"/"front") from a bay name, or (None, None).
+
+    Only --pdports-chromebook labels a bay at all, and only with this
+    vocabulary — a name that doesn't carry both an unambiguous side and an
+    unambiguous position (missing, or a board using different words) has
+    to be reported as unknown rather than assigned to a guessed slot.
+    """
+    text = (name or "").lower()
+    side_m = RE_BAY_SIDE.search(text)
+    position_m = RE_BAY_POSITION.search(text)
+    side = side_m.group(0) if side_m else None
+    position = position_m.group(0) if position_m else None
+    return (side, position)
+
+
 def port_attached(port):
     """Is something plugged into this port?
 

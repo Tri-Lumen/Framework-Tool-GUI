@@ -98,6 +98,7 @@ from .parsers import (
     RE_SOC,
     RE_TEMP,
     ac_connected,
+    bay_orientation,
     detect_model,
     parse_charge_limit,
     parse_firmware,
@@ -1103,7 +1104,12 @@ class App(QMainWindow):
             text.addWidget(name)
             text.addWidget(detail)
             row.addLayout(text, 1)
-            module_grid.addWidget(row_frame, index // 2, index % 2)
+            # Column = side (0 left, 1 right), row = position (0 back, 1
+            # front) — `_fill_bays` reorders `ports` into that same
+            # [LeftBack, LeftFront, RightBack, RightFront] sequence before
+            # this grid is painted, so a bay's row and the chassis
+            # diagram's marker for it land in the same physical spot.
+            module_grid.addWidget(row_frame, index % 2, index // 2)
             self.module_rows.append((icon, name, detail))
         bays.addLayout(module_grid, 1)
         panel.body.addLayout(bays)
@@ -1399,9 +1405,12 @@ class App(QMainWindow):
         self.port_empty.setVisible(not ports)
         for index, port in enumerate(ports):
             watts = port_watts(port)
+            # Neither port command can see the card in the bay, only the
+            # mainboard port's own PD role — an idle or sinking role is no
+            # more proof of a USB-C card than an idle one is proof of an
+            # empty bay, so this never claims a module type it wasn't told.
             module = port.get("name") or self._module_name(
-                module_icons.classify("usb-c" if port_attached(port) else ""),
-                port["port"])
+                module_icons.UNKNOWN, port["port"])
             if index:
                 self.port_rows.addWidget(rule())
             self.port_rows.addWidget(self._port_row((
@@ -1683,6 +1692,14 @@ class App(QMainWindow):
             have=lambda dep_id: bool(self._which_dep(dep_id)),
             rapl_present=bool(power.rapl_constraint_files(rapl_zones())))
         self.power_backend = backends[0] if backends else None
+        # AMD's own published cTDP range for the detected chip, or None for
+        # anything not in the table (every Intel chip today, since Intel
+        # publishes PL1/PL2 defaults rather than a laptop-maker-configurable
+        # min/max the same way). None means no manufacturer-derived presets
+        # below — free-text entry still works, bounded only by the generic
+        # MIN_WATTS/MAX_WATTS guard, same as before this table existed.
+        self.tdp_limits = power.tdp_limits_for(
+            self.cpu.get("short") or self.cpu.get("label", ""))
 
         if not self.power_backend:
             self._heading(box, parent, "CPU power limits",
@@ -1701,23 +1718,30 @@ class App(QMainWindow):
             "framework_tool cannot set these — the SoC owns them. "
             + meta["note"], badge=badge)
 
+        # The bar reads as percent-of-what-this-chip-actually-supports when
+        # that's known, rather than percent-of-the-generic-200 W guard.
+        bar_max = self.tdp_limits["max_w"] if self.tdp_limits else power.MAX_WATTS
+        default_w = str(self.tdp_limits["default_w"]) if self.tdp_limits else "25"
+        boost_default_w = (str(self.tdp_limits["default_w"])
+                           if self.tdp_limits else "35")
+
         panels = QHBoxLayout()
         panels.setSpacing(theme.SPACE[6])
         if meta["sets_watts"]:
             sustained = widgets.MetricPanel("Sustained (STAPM)", "W", True, parent)
-            self.tdp_sustained = self._metric_field(sustained, "25")
+            self.tdp_sustained = self._metric_field(sustained, default_w)
             self.tdp_sustained.textChanged.connect(
                 lambda t: sustained.bar.set_accent(
-                    self._fraction(t, power.MAX_WATTS)))
-            sustained.bar.set_accent(25 / power.MAX_WATTS)
+                    self._fraction(t, bar_max)))
+            sustained.bar.set_accent(float(default_w) / bar_max)
             panels.addWidget(sustained)
 
             boost = widgets.MetricPanel("Boost (PPT fast)", "W", True, parent)
-            self.tdp_boost = self._metric_field(boost, "35")
+            self.tdp_boost = self._metric_field(boost, boost_default_w)
             self.tdp_boost.textChanged.connect(
                 lambda t: boost.bar.set_accent(
-                    self._fraction(t, power.MAX_WATTS)))
-            boost.bar.set_accent(35 / power.MAX_WATTS)
+                    self._fraction(t, bar_max)))
+            boost.bar.set_accent(float(boost_default_w) / bar_max)
             panels.addWidget(boost)
 
             if self.power_backend == "ryzenadj":
@@ -1737,23 +1761,30 @@ class App(QMainWindow):
         panels.addStretch(1)
         box.addLayout(panels)
 
-        if meta["sets_watts"]:
+        # Presets are the manufacturer's own numbers for the detected chip,
+        # not invented ones: an unrecognised chip gets no preset row at all
+        # rather than three watt figures nobody has confirmed it supports.
+        if meta["sets_watts"] and self.tdp_limits:
             presets = QHBoxLayout()
             presets.setSpacing(theme.SPACE[3])
             presets.addWidget(label("Presets", "caption", parent))
             self.preset_buttons = {}
+            limits = self.tdp_limits
             # Filling the fields only: applying is always a separate,
-            # deliberate click, because these numbers are a guess at what
-            # the machine likes, not a reading from it.
-            for name, sustained_w, boost_w in (("Quiet 15 W", 15, 20),
-                                               ("Balanced 25 W", 25, 35),
-                                               ("Performance 45 W", 45, 60)):
+            # deliberate click. Boost matches sustained on every preset —
+            # there is no separate manufacturer boost figure, only the one
+            # cTDP band, so offering a distinct number there would be the
+            # same kind of guess this table exists to remove.
+            for name, watts in (
+                    ("Min ({} W)".format(limits["min_w"]), limits["min_w"]),
+                    ("Default ({} W)".format(limits["default_w"]),
+                     limits["default_w"]),
+                    ("Max ({} W)".format(limits["max_w"]), limits["max_w"])):
                 button = QPushButton(name, parent)
                 button.setProperty("role", "preset")
                 button.setProperty("selected", "false")
                 button.clicked.connect(
-                    lambda _=False, n=name, s=sustained_w, b=boost_w:
-                    self._fill_tdp(n, s, b))
+                    lambda _=False, n=name, w=watts: self._fill_tdp(n, w, w))
                 presets.addWidget(button)
                 self.preset_buttons[name] = button
             presets.addStretch(1)
@@ -1846,17 +1877,40 @@ class App(QMainWindow):
                                "true" if label_text == name else "false")
             widgets.restyle(button)
 
+    def _check_manufacturer_range(self, watts):
+        """Reject a wattage outside the detected chip's own cTDP range.
+
+        Only runs when that range is known (`self.tdp_limits`) — an
+        unrecognised chip is still bounded by the generic
+        MIN_WATTS/MAX_WATTS guard in `power.check_watts`, nothing more.
+        """
+        w = power.check_watts(watts)
+        limits = self.tdp_limits
+        if not limits["min_w"] <= w <= limits["max_w"]:
+            raise power.PowerError(
+                "{} W is outside {}'s manufacturer cTDP range of "
+                "{}-{} W.".format(
+                    w, self.cpu.get("short") or self.cpu.get("label")
+                    or "this CPU", limits["min_w"], limits["max_w"]))
+        return w
+
     def _apply_power(self):
         backend = self.power_backend
         try:
             if backend == "ryzenadj":
                 tctl = getattr(self, "tdp_tctl", None)
                 tctl = (tctl.text().strip() or None) if tctl else None
+                if self.tdp_limits:
+                    self._check_manufacturer_range(self.tdp_sustained.text())
+                    self._check_manufacturer_range(self.tdp_boost.text())
                 args = power.ryzenadj_args(self.tdp_sustained.text(),
                                            self.tdp_boost.text(), tctl)
             elif backend == "rapl":
                 sustained = power.check_watts(self.tdp_sustained.text())
                 boost = power.check_watts(self.tdp_boost.text())
+                if self.tdp_limits:
+                    self._check_manufacturer_range(sustained)
+                    self._check_manufacturer_range(boost)
             else:
                 percent = power.check_percent(self.tdp_percent.text())
         except power.PowerError as e:
@@ -2533,25 +2587,63 @@ class App(QMainWindow):
             self.sensor_rows[name].set_reading(
                 "{} C".format(value), int(value) / TEMP_SCALE_C)
 
+    # The order `_fill_bays` arranges ports into before filling rows/the
+    # diagram, matching the (row, column) scheme `module_grid` and
+    # `ChassisDiagram.bay_rects` both use: back above front, left beside
+    # right.
+    BAY_SLOTS = (("left", "back"), ("left", "front"),
+                 ("right", "back"), ("right", "front"))
+
+    def _ordered_by_bay(self, ports, chassis):
+        """Reorder ports into `BAY_SLOTS` order using each port's own name.
+
+        Scoped to the one chassis this has real hardware evidence for — a
+        4-bay "sides" layout (Laptop 12/13). A port without a name, or
+        whose name doesn't read as an unambiguous side+position (either
+        word missing, or duplicated across two ports), keeps its original
+        position instead of being guessed into a slot; any other chassis
+        (Laptop 16's 6 bays, the Desktop's 2-bay front layout) is untested
+        for this and passed through unchanged.
+        """
+        if chassis.get("layout") != "sides" or chassis.get("bays") != 4:
+            return ports
+        slots = [None] * len(self.BAY_SLOTS)
+        leftover = []
+        for port in ports:
+            orientation = bay_orientation(port.get("name"))
+            try:
+                index = self.BAY_SLOTS.index(orientation)
+            except ValueError:
+                index = None
+            if index is not None and slots[index] is None:
+                slots[index] = port
+            else:
+                leftover.append(port)
+        for index, slot in enumerate(slots):
+            if slot is None and leftover:
+                slots[index] = leftover.pop(0)
+        return [port for port in slots if port is not None]
+
     def _fill_bays(self):
         """Paint the four bay rows from what the port commands reported.
 
-        framework_tool does not name the card in each bay on any board, so
-        the type is inferred from whether the bay carries power and
-        otherwise falls back to the neutral module mark. The row is still
-        useful without it: the role and negotiated wattage are the reading
-        people come here for.
+        Neither port command can see the card in a bay, only whether the
+        mainboard port behind it is carrying a PD role — an HDMI or
+        microSD card sits on a port that still reports its own idle
+        "source" default, so an attached role is never proof of a USB-C
+        card. Every row therefore gets the neutral module mark; the role
+        and negotiated wattage are the reading people come here for.
 
         A row reads "not read" only when no port command named that bay at
         all — a bay the CLI *did* report but which is sitting idle says so,
         which is a different fact and used to be indistinguishable.
         """
-        ports = self.readings.get("ports") or []
+        chassis = device_images.chassis_for(self.caps.get("model", ""))
         # Reshape the drawing for the detected chassis before colouring it:
         # a Laptop 16 has six slots and is wider than a 12, and the diagram
         # is a legend for these rows, so it has to be the right machine.
-        self.chassis.set_chassis(
-            device_images.chassis_for(self.caps.get("model", "")))
+        self.chassis.set_chassis(chassis)
+        ports = self._ordered_by_bay(self.readings.get("ports") or [], chassis)
         states = []
         for index, (icon, name, detail) in enumerate(self.module_rows):
             port = ports[index] if index < len(ports) else None
@@ -2570,17 +2662,9 @@ class App(QMainWindow):
             else:
                 state, token = "idle", "warn"
             states.append(state)
-            # A bay with something attached has a USB-C card in it: an HDMI
-            # or microSD card never reports a role. That is the only per-bay
-            # module identity either port command supports, so it is the
-            # only one inferred here — and it is about the *port*, not the
-            # card, which is why an idle row says "nothing attached" rather
-            # than implying the bay is empty.
-            hint = "usb-c" if attached else ""
-            module_type = module_icons.classify(hint)
-            icon.set_module(module_type, module_icons.capacity(hint), token)
+            icon.set_module(module_icons.UNKNOWN, token=token)
             name.setText(port.get("name")
-                         or self._module_name(module_type, port["port"]))
+                         or "Port {}".format(port["port"]))
             detail.setText("{} · {}".format(role, self._bay_power(port))
                            if attached else "nothing attached")
         self.chassis.set_states(states)

@@ -14,7 +14,7 @@ paint themselves; everything else is styled by the sheet and carries only a
 
 import time
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -647,6 +647,10 @@ class ChassisDiagram(QWidget):
     MAX_HEIGHT = 150
     BAY_W, BAY_H = 12, 22       # a side slot; the front layout swaps these
     MARGIN = 10                 # room for the slot tabs outside the body
+    # Room for the "Back"/"Front" captions on a clamshell. Added on top of
+    # the body's own scaled size rather than taken out of it, so it does
+    # not shrink the drawing every model already scales against.
+    TAG_H = 14
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -682,11 +686,14 @@ class ChassisDiagram(QWidget):
         scale = self.pixels_per_mm()
         body_w = float(self._chassis["width_mm"]) * scale
         body_h = float(self._chassis["depth_mm"]) * scale
-        self._body = QRectF(self.MARGIN + self.BAY_W / 2.0, self.MARGIN,
-                            body_w, body_h)
+        # A desktop has no front/back to mark, so it gets none of the extra
+        # vertical room the caption reserves.
+        top_tag = self.TAG_H if self._chassis.get("layout") != "front" else 0
+        self._body = QRectF(self.MARGIN + self.BAY_W / 2.0,
+                            self.MARGIN + top_tag, body_w, body_h)
         self.setFixedSize(
             int(body_w + 2 * self.MARGIN + self.BAY_W),
-            int(body_h + 2 * self.MARGIN + 6))
+            int(body_h + 2 * self.MARGIN + 6 + 2 * top_tag))
 
     def set_states(self, states):
         """states: one of 'sink', 'source', 'idle', 'empty' per bay.
@@ -719,7 +726,11 @@ class ChassisDiagram(QWidget):
                 x = body.left() + body.width() * (i + 1) / (count + 1) - w / 2
                 rects.append(QRectF(x, body.bottom() - h / 2, w, h))
             return rects
-        # Side slots, split evenly between the two edges, front to rear.
+        # Side slots, split evenly between the two edges, back to front
+        # (index 0 nearest the top/hinge edge) — `App._ordered_by_bay`
+        # sorts the states this widget is given into that same order for
+        # the one chassis it is confirmed to hold for a 4-bay "sides"
+        # layout, so a bay's row and its marker here land in the same slot.
         left = (count + 1) // 2
         for i in range(count):
             side_index = i if i < left else i - left
@@ -741,18 +752,51 @@ class ChassisDiagram(QWidget):
         pen.setWidthF(1.3)
         painter.setPen(pen)
         painter.drawRoundedRect(body, 6, 6)
-        # The lid line, which reads as a laptop; a desktop has no such edge.
+        # Two hinge caps and a speaker grille between them, plus explicit
+        # captions — a desktop has no front/back axis to mark. Bay names
+        # like "Left Back" are meaningless without a fixed, visible answer
+        # to which edge of this drawing they mean, so the words are
+        # spelled out rather than left to a decorative line to imply.
         if self._chassis.get("layout") != "front":
-            painter.drawLine(int(body.left() - self.BAY_W / 2),
-                             int(body.bottom() + 8),
-                             int(body.right() + self.BAY_W / 2),
-                             int(body.bottom() + 8))
+            tab_w = body.width() * 0.12
+            pen.setWidthF(2.2)
+            painter.setPen(pen)
+            for x in (body.left() + body.width() * 0.06,
+                     body.right() - body.width() * 0.06 - tab_w):
+                painter.drawLine(int(x), int(body.top()),
+                                 int(x + tab_w), int(body.top()))
+            grille_left = body.center().x() - body.width() * 0.16
+            grille_right = body.center().x() + body.width() * 0.16
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            ticks = 7
+            for i in range(ticks):
+                x = grille_left + (grille_right - grille_left) * i / (ticks - 1)
+                painter.drawLine(QPointF(x, body.top() - 1),
+                                 QPointF(x, body.top() + 2))
+            font = painter.font()
+            font.setPixelSize(theme.FONT_SIZES["caption"] - 2)
+            painter.setFont(font)
+            pen.setColor(qcolour("text.muted"))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawText(
+                QRectF(body.left(), 0, body.width(), body.top() - 2),
+                Qt.AlignHCenter | Qt.AlignBottom, "BACK")
+            painter.drawText(
+                QRectF(body.left(), body.bottom() + 2, body.width(),
+                       self.height() - body.bottom() - 2),
+                Qt.AlignHCenter | Qt.AlignTop, "FRONT")
         pen.setColor(qcolour("track"))
         pen.setWidthF(1.0)
         painter.setPen(pen)
         inset = body.adjusted(body.width() * 0.06, body.height() * 0.16,
                               -body.width() * 0.06, -body.height() * 0.20)
         painter.drawRoundedRect(inset, 3, 3)
+        if self._chassis.get("layout") == "front":
+            self._paint_desktop_front(painter, pen, body)
+        else:
+            self._paint_clamshell_deck(painter, pen, inset)
         for index, rect in enumerate(self.bay_rects()):
             state = self._state(index)
             pen.setColor(QColor(self._bay_colour(state)))
@@ -762,6 +806,71 @@ class ChassisDiagram(QWidget):
                              else Qt.NoBrush)
             painter.drawRoundedRect(rect, 2, 2)
         painter.end()
+
+    def _paint_clamshell_deck(self, painter, pen, inset):
+        """Keyboard row lines, a trackpad, and a power button drawn apart
+        from them — every Framework laptop's is its own key, separate
+        from the main block, top-right above the keyboard.
+
+        Schematic, not a rendering: real keycaps do not survive a deck
+        drawn at ~100px wide, so a few row dividers stand in for the whole
+        keyboard rather than every key, matching the level of detail the
+        rest of this widget already draws at.
+        """
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        key_area = QRectF(inset.left() + inset.width() * 0.04,
+                          inset.top() + inset.height() * 0.08,
+                          inset.width() * 0.8, inset.height() * 0.46)
+        for i in range(1, 4):
+            y = key_area.top() + key_area.height() * i / 4
+            painter.drawLine(QPointF(key_area.left(), y),
+                             QPointF(key_area.right(), y))
+        trackpad_w = inset.width() * 0.32
+        trackpad_h = inset.height() * 0.26
+        trackpad = QRectF(inset.center().x() - trackpad_w / 2,
+                          inset.bottom() - trackpad_h - inset.height() * 0.04,
+                          trackpad_w, trackpad_h)
+        painter.drawRoundedRect(trackpad, 3, 3)
+        power_size = max(min(inset.width(), inset.height()) * 0.13, 6.0)
+        power_rect = QRectF(inset.right() - power_size,
+                            key_area.top(), power_size, power_size)
+        painter.drawRoundedRect(power_rect, 1.5, 1.5)
+
+    def _paint_desktop_front(self, painter, pen, body):
+        """A grid of vent tiles, a fan hub mark, and the slide switch.
+
+        Schematic, not a rendering: the real face is a grid of perforated
+        tiles in whichever colour the owner picked, which a two-colour
+        line drawing can't show — the grid, the hub and the switch are
+        what is left that still reads as *this* machine's front panel
+        rather than a bare box with two bays cut into the bottom.
+        """
+        pen.setWidthF(0.8)
+        painter.setPen(pen)
+        columns, rows = 3, 6
+        grid_top = body.top() + body.height() * 0.06
+        grid_bottom = body.bottom() - body.height() * 0.18
+        cell_w = body.width() / columns
+        cell_h = (grid_bottom - grid_top) / rows
+        for row in range(rows):
+            for col in range(columns):
+                cell = QRectF(body.left() + col * cell_w,
+                              grid_top + row * cell_h, cell_w, cell_h)
+                painter.drawRect(cell.adjusted(1.5, 1.5, -1.5, -1.5))
+        hub_r = min(cell_w, cell_h) * 0.32
+        hub_center = QPointF(body.left() + cell_w * 1.5,
+                             grid_top + cell_h * 2.5)
+        painter.drawEllipse(hub_center, hub_r, hub_r)
+        switch_w, switch_h = body.width() * 0.22, body.height() * 0.045
+        switch = QRectF(body.right() - switch_w - body.width() * 0.08,
+                        grid_bottom + (body.bottom() - grid_bottom) / 2
+                        - switch_h / 2, switch_w, switch_h)
+        painter.drawRoundedRect(switch, switch_h / 2, switch_h / 2)
+        thumb_r = switch_h * 0.4
+        painter.drawEllipse(
+            QPointF(switch.left() + thumb_r * 1.4, switch.center().y()),
+            thumb_r, thumb_r)
 
 
 class MetricPanel(Panel):
