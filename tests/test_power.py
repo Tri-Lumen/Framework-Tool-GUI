@@ -253,6 +253,33 @@ class TestValidation(unittest.TestCase):
         self.assertRaises(power.PowerError, power.check_percent, 101)
 
 
+class TestTdpLimits(unittest.TestCase):
+    """AMD's published cTDP range per chip, not a guess for anything else."""
+
+    def test_every_table_entry_is_reachable(self):
+        cases = {
+            "Ryzen 5 7640U": (15, 28, 30),
+            "Ryzen 7 7840U": (15, 28, 30),
+            "Ryzen 7 7840HS": (35, 45, 54),
+            "Ryzen 9 7940HS": (35, 45, 54),
+            "Ryzen AI 9 HX 370": (15, 28, 54),
+        }
+        for label, (lo, default, hi) in cases.items():
+            with self.subTest(label=label):
+                limits = power.tdp_limits_for(label)
+                self.assertEqual(limits, {"min_w": lo, "default_w": default,
+                                          "max_w": hi})
+
+    def test_case_insensitive(self):
+        self.assertIsNotNone(power.tdp_limits_for("ryzen 5 7640u"))
+
+    def test_unrecognised_chip_is_none_not_a_guess(self):
+        # Every Intel chip today, and anything not yet added to the table.
+        self.assertIsNone(power.tdp_limits_for("Core Ultra 7 155H"))
+        self.assertIsNone(power.tdp_limits_for(""))
+        self.assertIsNone(power.tdp_limits_for(None))
+
+
 class TestRyzenadj(unittest.TestCase):
 
     def test_watts_are_converted_to_milliwatts(self):

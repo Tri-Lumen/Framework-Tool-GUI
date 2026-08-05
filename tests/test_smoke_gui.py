@@ -60,7 +60,7 @@ CAN_RUN = QT_AVAILABLE and STUB_SUPPORTED
 
 if CAN_RUN:
     from frameworkgui import app as fg  # noqa: E402
-    from frameworkgui import navigation  # noqa: E402,I001
+    from frameworkgui import device_images, navigation, parsers  # noqa: E402,I001
 
 
 def make_stub_binary(tmpdir, versions_output):
@@ -546,3 +546,106 @@ class TestChassisFollowsTheModel(unittest.TestCase):
         self.assertGreater(w16, w12,
                            "the Laptop 16 is not drawn wider than the 12")
         self.assertGreater(h16, h12)
+
+
+# Named exactly as a real Laptop 13 AMD reported them (--pdports-chromebook),
+# in the order that machine's EC happened to print them — not the same order
+# `_ordered_by_bay`'s canonical slots use, which is the point of the test.
+FOUR_BAY_PDPORTS = """USB-C Port 0 (Right Back):
+  Role:          Source
+  Voltage Now:   5000 mV
+  Current Lim:   0 mA
+  Charging Type: None
+  Max Power:     0.0 W
+USB-C Port 1 (Right Front):
+  Role:          Disconnected
+  Voltage Now:   0 mV
+  Current Lim:   0 mA
+  Charging Type: None
+  Max Power:     0.0 W
+USB-C Port 2 (Left Front):
+  Role:          Source
+  Voltage Now:   5000 mV
+  Current Lim:   0 mA
+  Charging Type: None
+  Max Power:     0.0 W
+USB-C Port 3 (Left Back):
+  Role:          Disconnected
+  Voltage Now:   0 mV
+  Current Lim:   0 mA
+  Charging Type: None
+  Max Power:     0.0 W
+"""
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestBayOrdering(unittest.TestCase):
+    """A bay's row and its chassis-diagram marker have to land in the same
+    slot — the real bug behind a real Laptop 13's "disconnected" markers
+    showing up in the wrong corner once the CLI's port order didn't match
+    the drawing's old index-based assumption.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_four_bay_sides_chassis_is_reordered_by_name(self):
+        ports = parsers.parse_ports(FOUR_BAY_PDPORTS)
+        chassis = device_images.chassis_for("Laptop 13")
+        ordered = self.window._ordered_by_bay(ports, chassis)
+        self.assertEqual(
+            [p["name"] for p in ordered],
+            ["Left Back", "Left Front", "Right Back", "Right Front"])
+
+    def test_a_six_bay_chassis_is_left_in_cli_order(self):
+        # Laptop 16 has no real-hardware evidence for this naming scheme,
+        # so it keeps the original positional fallback untouched.
+        ports = parsers.parse_ports(FOUR_BAY_PDPORTS)
+        chassis = device_images.chassis_for("Laptop 16")
+        ordered = self.window._ordered_by_bay(ports, chassis)
+        self.assertEqual(
+            [p["name"] for p in ordered],
+            ["Right Back", "Right Front", "Left Front", "Left Back"])
+
+    def test_an_unplaceable_name_keeps_its_slot_rather_than_crash(self):
+        ports = parsers.parse_ports(FOUR_BAY_PDPORTS)
+        ports[0]["name"] = "Weird Bay"
+        chassis = device_images.chassis_for("Laptop 13")
+        ordered = self.window._ordered_by_bay(ports, chassis)
+        self.assertEqual(len(ordered), 4)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestManufacturerTdpRange(unittest.TestCase):
+    """A wattage outside the detected chip's own cTDP range is refused the
+    same way any other invalid input is: through PowerError, before a
+    command is ever built."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        self.window.tdp_limits = {"min_w": 15, "default_w": 28, "max_w": 30}
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_within_range_is_accepted(self):
+        self.assertEqual(self.window._check_manufacturer_range("30"), 30)
+
+    def test_above_the_manufacturer_max_is_refused(self):
+        from frameworkgui import power
+        self.assertRaises(power.PowerError,
+                          self.window._check_manufacturer_range, "45")
+
+    def test_below_the_manufacturer_min_is_refused(self):
+        from frameworkgui import power
+        self.assertRaises(power.PowerError,
+                          self.window._check_manufacturer_range, "5")

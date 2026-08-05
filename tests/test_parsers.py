@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from frameworkgui.parsers import (  # noqa: E402
     ac_connected,
+    bay_orientation,
     detect_model,
     parse_charge_limit,
     parse_firmware,
@@ -532,6 +533,30 @@ class TestAttachedWithoutFigures(unittest.TestCase):
         # Fail open: a firmware that invents a connected state should not
         # make the bay disappear.
         self.assertTrue(port_attached({"role": "SinkStandby"}))
+
+
+class TestBayOrientation(unittest.TestCase):
+    """(side, position) out of a --pdports-chromebook bay name."""
+
+    def test_all_four_combinations(self):
+        self.assertEqual(bay_orientation("Right Back"), ("right", "back"))
+        self.assertEqual(bay_orientation("Right Front"), ("right", "front"))
+        self.assertEqual(bay_orientation("Left Back"), ("left", "back"))
+        self.assertEqual(bay_orientation("Left Front"), ("left", "front"))
+
+    def test_case_insensitive(self):
+        self.assertEqual(bay_orientation("left front"), ("left", "front"))
+
+    def test_missing_name_is_unknown_not_a_guess(self):
+        # Plain --pdports never names a bay at all.
+        self.assertEqual(bay_orientation(None), (None, None))
+        self.assertEqual(bay_orientation(""), (None, None))
+
+    def test_unrecognised_words_are_unknown(self):
+        # A board using different vocabulary must not be guessed into a
+        # side or a position it never named.
+        self.assertEqual(bay_orientation("Rear Panel"), (None, None))
+        self.assertEqual(bay_orientation("Right"), ("right", None))
 
 
 class TestShortFirmware(unittest.TestCase):
