@@ -26,9 +26,9 @@ special-cased by GitHub and renders on every page.
 
 ## Image links
 
-The pages reference `../docs/screenshots/*.png`, which resolves inside this
-repository but **not** on the wiki, where there is no parent directory. When
-publishing, either copy `docs/screenshots/` into the wiki repo as well or
-rewrite the links to absolute
-`https://raw.githubusercontent.com/Tri-Lumen/Framework-Tool-GUI/main/docs/screenshots/...`
+The pages reference `screenshots/*.png`, which sit beside them in `wiki/`.
+That resolves both here and on the published wiki, as long as
+`wiki/screenshots/` is copied across with the pages. If you would rather not
+copy them, rewrite the links to absolute
+`https://raw.githubusercontent.com/Tri-Lumen/Framework-Tool-GUI/main/wiki/screenshots/...`
 URLs.

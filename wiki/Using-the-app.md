@@ -5,7 +5,7 @@ column, and a resizable output drawer. Everything the app runs is echoed
 into the drawer with its output underneath, in a tab named for the program
 that ran it.
 
-![Overview](../docs/screenshots/overview.png)
+![Overview](screenshots/overview.png)
 
 ## Overview → Device
 
@@ -15,19 +15,30 @@ Everything else on the pane needs three more elevated commands
 `--expansion-bay` where they apply), so they run automatically only when you
 are already elevated. Otherwise press **Rescan device**.
 
-**Expansion bays.** The bay rows come from the USB-C PD port state. What the
-CLI can actually tell you here is thin: whether a bay negotiated a power
-contract, which implies a USB-C card and nothing else. DP/HDMI and Audio
-cards *are* identifiable — but not locatable, because the API upstream uses
-abstracts away the USB topology — so they are listed under the bays as
-"also fitted" rather than being dropped into a row that would be a guess.
+**Expansion bays.** The bay rows come from the USB-C PD port state, and that
+is a statement about the *mainboard port*, not about the card in front of
+it. USB-C and USB-A expansion cards are passive passthroughs — there is
+nothing on them to enumerate — so a bay with a card in it and nothing
+plugged into that card reads "nothing attached". That is the honest answer,
+not a failed detection.
+
+A port that reports a role (`sink`, `source`) has something on it; the
+wattage is shown when the EC reports enough to work one out, and the voltage
+alone when it does not. Some EC firmwares report a charging port's role
+without a current limit, which is why the row does not go quiet when the
+wattage is missing.
+
+DP/HDMI and Audio cards *are* identifiable — but not locatable, because the
+API upstream uses abstracts away the USB topology — so they are listed under
+the bays as "also fitted" rather than being dropped into a row that would be
+a guess.
 
 The drawing beside the rows is the detected chassis, scaled from its real
 dimensions and showing the number of slots that machine has.
 
 ## Overview → Diagnostics
 
-![Diagnostics](../docs/screenshots/tools.png)
+![Diagnostics](screenshots/tools.png)
 
 Twelve workflows. The ones with a known length draw an animated progress bar
 and the timings are yours to change — the fan burst's duration, the thermal
@@ -53,7 +64,7 @@ the drawer.
 
 ## Hardware → Settings
 
-![Settings](../docs/screenshots/settings.png)
+![Settings](screenshots/settings.png)
 
 One row per setting the mainboard supports. **Get** reads the current value
 back where the CLI has a read for it; a row with no Get is one the CLI can
@@ -71,7 +82,7 @@ and trackpad, so switching it off leaves the machine without either.
 
 ## Power → CPU limits
 
-![CPU limits](../docs/screenshots/power.png)
+![CPU limits](screenshots/power.png)
 
 `framework_tool` cannot set these — the SoC owns them — so this drives a
 different program depending on what you have:

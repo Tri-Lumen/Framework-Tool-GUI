@@ -30,18 +30,17 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import navigation  # noqa: E402
-import power  # noqa: E402
+from frameworkgui import navigation, power  # noqa: E402
 
 GUI_SOURCE_PATH = os.path.join(os.path.dirname(__file__), "..",
-                               "framework_gui.py")
+                               "frameworkgui", "app.py")
 
 with open(GUI_SOURCE_PATH, encoding="utf-8") as _fh:
     GUI_SOURCE = _fh.read()
 
 
 def _app_attribute(name):
-    """Read one class attribute off App without importing framework_gui.
+    """Read one class attribute off App without importing the app module.
 
     Importing it would pull in PySide6, and these are logic tests — they run
     on CI jobs that deliberately have no toolkit installed, which is the
@@ -138,7 +137,7 @@ FLAG_VALUES = {
 }
 
 
-# Flags in framework_gui.py that belong to a *different* program. The
+# Flags in frameworkgui/app.py that belong to a *different* program. The
 # source sweep below is deliberately broad — it matches every quoted flag in
 # every argument list rather than only the framework_tool call sites — so
 # these are declared rather than filtered by guesswork. Anything not listed
@@ -263,7 +262,7 @@ class TestAppCommandsUseRealFlags(unittest.TestCase):
                 continue
             self.assertTrue(
                 is_known_flag(flag),
-                f"framework_gui.py runs '{flag}', which framework_tool does "
+                f"frameworkgui/app.py runs '{flag}', which framework_tool does "
                 f"not publish. If it belongs to another program, declare it "
                 f"in OTHER_PROGRAM_FLAGS with what it is for.")
 
@@ -314,7 +313,7 @@ class TestPowerBackendCommands(unittest.TestCase):
                               f"ryzenadj called with unknown {flag}")
 
     def test_every_backend_names_a_dependency_that_exists(self):
-        import deps
+        from frameworkgui import deps
         for backend_id, backend in power.BACKENDS.items():
             dependency = backend["dependency"]
             if dependency is None:

@@ -13,8 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import appstate  # noqa: E402
-import theme  # noqa: E402
+from frameworkgui import appstate, theme  # noqa: E402
 
 
 def reader(text):

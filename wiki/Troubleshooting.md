@@ -75,6 +75,12 @@ the top.
 There is no portable blur on Linux, so "acrylic" there means translucency
 without one. On Windows 11 it is the real system backdrop.
 
+On Windows 11 there is one more switch, and it is not the app's: Settings ›
+Personalisation › Colours › **Transparency effects**. With it off, DWM
+accepts the app's request for an acrylic backdrop and then draws a flat
+surface, so the app reads that setting and shows the strip rather than
+claiming an effect that is not on screen. Turn it on and relaunch.
+
 ## A parser shows raw output instead of a nice reading
 
 That is the intended failure mode. Upstream states plainly that "the

@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import navigation  # noqa: E402
+from frameworkgui import navigation  # noqa: E402
 
 LAPTOP_13 = {
     "model": "Laptop 13 (AMD Ryzen AI 300 Series)", "chassis": "Laptop 13",

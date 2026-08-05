@@ -12,9 +12,12 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import device_images  # noqa: E402
+from frameworkgui import device_images  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The images ship inside the package, next to the module that names them —
+# which is exactly how `device_images.asset_root()` finds them at runtime.
+PACKAGE = os.path.join(REPO, "frameworkgui")
 
 
 class TestImageFor(unittest.TestCase):
@@ -88,12 +91,12 @@ class TestShippedAssets(unittest.TestCase):
 
     def test_every_catalog_image_exists_in_the_repo(self):
         for name in device_images.IMAGES:
-            path = os.path.join(REPO, device_images.ASSET_DIR, name)
+            path = os.path.join(PACKAGE, device_images.ASSET_DIR, name)
             self.assertTrue(os.path.isfile(path),
                             "{} is referenced but not shipped".format(name))
 
     def test_no_orphan_images(self):
-        directory = os.path.join(REPO, device_images.ASSET_DIR)
+        directory = os.path.join(PACKAGE, device_images.ASSET_DIR)
         on_disk = sorted(f for f in os.listdir(directory)
                          if f.endswith(".png"))
         self.assertEqual(on_disk, sorted(device_images.IMAGES),
@@ -104,7 +107,7 @@ class TestShippedAssets(unittest.TestCase):
         # These go into the exe and the Flatpak bundle; a full-resolution
         # press photo would add megabytes per chassis for a 420x206 slot.
         for name in device_images.IMAGES:
-            path = os.path.join(REPO, device_images.ASSET_DIR, name)
+            path = os.path.join(PACKAGE, device_images.ASSET_DIR, name)
             self.assertLess(os.path.getsize(path), 400 * 1024,
                             "{} is too large — downscale it".format(name))
 

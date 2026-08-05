@@ -15,7 +15,7 @@ depends on the CPU vendor and the OS:
                                       no real TDP tool is installed)
 
 Like parsers.py this module imports nothing but the stdlib and never touches
-tkinter, so it is unit-testable without a display. Anything that needs the
+the toolkit, so it is unit-testable without a display. Anything that needs the
 filesystem or a subprocess takes an injectable callable.
 
 Nothing here is persistent, deliberately: every limit these backends set is
@@ -77,12 +77,74 @@ def detect_vendor(cpuinfo="", processor_identifier="", machine=""):
     return VENDOR_UNKNOWN
 
 
-def cpu_label(cpuinfo="", processor_identifier=""):
-    """Human-readable CPU name, or '' if neither source names one."""
+def cpu_label(cpuinfo="", processor_identifier="", brand=""):
+    """Human-readable CPU name, or '' if no source names one.
+
+    `brand` is the marketing string where the caller could get one — the
+    registry's ProcessorNameString on Windows. It wins, because the other
+    two sources are worse in different ways: /proc/cpuinfo's model name is
+    the same string with the marketing noise still attached, and
+    %PROCESSOR_IDENTIFIER% is not a name at all.
+    """
+    if (brand or "").strip():
+        return brand.strip()
     m = RE_MODEL_NAME.search(cpuinfo or "")
     if m:
         return m.group(1).strip()
     return (processor_identifier or "").strip()
+
+
+# The parts of a CPU brand string that are not the CPU's name. Windows'
+# %PROCESSOR_IDENTIFIER% is the extreme case — "AMD64 Family 25 Model 116
+# Stepping 1, AuthenticAMD" is 47 characters that identify a whole
+# generation rather than a chip, and it pushed the Overview's sub-line onto
+# three wrapped lines on a real machine.
+RE_CPUID_STRING = re.compile(
+    r"^(x86|AMD64|ARM64|Intel64|EM64T)?\s*Family\s+\d+\s+Model\s+\d+"
+    r"(\s+Stepping\s+\d+)?\s*(,.*)?$", re.IGNORECASE)
+# Trailing hardware the name does not need: the integrated GPU, the clock
+# speed, the word "processor", the registered-trademark marks.
+RE_CPU_NOISE = re.compile(
+    # "w/ Radeon 780M Graphics", "with Radeon Graphics" — the integrated
+    # GPU, which is never what someone is looking for in a CPU field.
+    r"\s*\b(?:w/|with\b).*$"
+    r"|\s*\b\d+-Core Processor\b\s*$"
+    r"|\s*\bCPU\b\s*(?:@\s*[\d.]+\s*[GM]Hz)?\s*$"
+    r"|\s*@\s*[\d.]+\s*[GM]Hz\s*$"
+    r"|\s*\bProcessor\b\s*$",
+    re.IGNORECASE)
+RE_CPU_MARKS = re.compile(r"\((?:R|TM|C)\)", re.IGNORECASE)
+# The vendor's own name, wherever it sits — Intel puts it after the
+# generation ("13th Gen Intel Core i5-1340P"), AMD puts it first. The board
+# string beside this already says who made the machine, and "Ryzen 7 7840U"
+# is how the chip is referred to everywhere except inside a CPUID register.
+RE_CPU_VENDOR = re.compile(r"\b(AMD|Intel|Genuine Intel|AuthenticAMD)\b\s*",
+                           re.IGNORECASE)
+
+
+def short_cpu_label(label):
+    """A CPU name at the length a heading can carry.
+
+        AMD Ryzen 7 7840U w/ Radeon 780M Graphics  ->  Ryzen 7 7840U
+        Intel(R) Core(TM) i7-1260P CPU @ 2.10GHz   ->  Core i7-1260P
+        AMD64 Family 25 Model 116 Stepping 1, ...  ->  ''
+
+    The last case is the point: %PROCESSOR_IDENTIFIER% names a family, not
+    a processor, so there is nothing in it worth the width. Empty means the
+    caller should show nothing rather than a string that reads like a
+    reading. Everything unrecognised is passed through untouched — this
+    trims known noise, it does not guess at names.
+    """
+    text = " ".join((label or "").split())
+    if not text or RE_CPUID_STRING.match(text):
+        return ""
+    text = RE_CPU_MARKS.sub("", text)
+    text = RE_CPU_VENDOR.sub("", text)
+    previous = None
+    while previous != text:                 # "... CPU @ 2.10GHz" is two
+        previous = text
+        text = RE_CPU_NOISE.sub("", text).strip()
+    return " ".join(text.split()).strip(" ,-")
 
 
 # ---------- backend registry ----------

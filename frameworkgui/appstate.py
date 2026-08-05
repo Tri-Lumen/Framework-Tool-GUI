@@ -18,7 +18,7 @@ a drawer height.
 import json
 import os
 
-import theme
+from . import theme
 
 DEFAULTS = {
     "appearance": theme.ACRYLIC,
