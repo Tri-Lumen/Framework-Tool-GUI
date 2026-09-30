@@ -419,6 +419,14 @@ failure mode to watch for.
   Diagnostics entries, so running one rewrote two Settings rows from a
   different section with no sign there that anything had moved. They are
   `navigation.SETTINGS_PRESETS` now, rendered above the rows they set.
+  `_apply_preset` used to fill both rows immediately, before the command
+  that was supposed to set them had even run — a cancelled pkexec prompt or
+  a value the device refused still left the rows claiming it had taken.
+  `tool_preset` fills them now, from what it actually confirmed: a real
+  `--charge-limit` re-read for the row that has one, the set command's own
+  exit code for `charge_rate` (which has none — `"get": None` on that row),
+  the same standard `_get_setting_worker`/`_auto_setting_worker` already
+  held every other row to.
 
 - **Read a setting with the reader its row names.** framework_tool prints
   more than one number in some of these blocks and the generic reader took
@@ -542,14 +550,17 @@ failure mode to watch for.
   so the UI never blocks; results come back by emitting a Qt signal, which
   Qt queues onto the UI thread. A worker thread must never touch a widget —
   `sig_log`, `sig_status`, `sig_detected`, `sig_progress`, `sig_readings`,
-  `sig_fill` and `sig_tool_done` are the whole interface between them and
-  the UI, and that is the Qt equivalent of the Tk version's `after(0, …)`
-  rule. The 14 diagnostics are multi-step sequences with a shared cancel
-  flag (`self._cancel`) checked between steps; the multi-step ones report
+  `sig_fill`, `sig_tool_done`, `sig_update_checked` and
+  `sig_update_downloaded` are the whole interface between them and the UI,
+  and that is the Qt equivalent of the Tk version's `after(0, …)` rule. The
+  14 diagnostics are multi-step sequences with a shared cancel flag
+  (`self._cancel`) checked between steps; the multi-step ones report
   per-step progress into the Diagnostics detail panel, whose "Cancel and
   restore auto" button stays reachable for the whole run. State-changing
   tools (fan duty, kb backlight, fingerprint LED) always restore the
-  previous/auto state in a `finally` block, including on cancel.
+  previous/auto state in a `finally` block, including on cancel. Every one
+  of those signals is emitted through `App._emit`, never `.emit()`
+  directly — see the gotcha below.
 
 ## Known gotchas (learned the hard way — don't reintroduce these)
 
@@ -638,6 +649,27 @@ failure mode to watch for.
    loop turn (a short `QTimer.singleShot` after `processEvents()`) before
    `window.grab()`. Worth knowing before "fixing" a
    layout bug that isn't there.
+
+10. **Closing the window does not stop the daemon thread a command is
+    running on.** Every worker thread's next `_log`/`set_status`/etc. call
+    used to emit straight into `self.sig_*`, and if the window had been
+    closed mid-run (Rescan, a Diagnostics tool, a Settings write, the
+    updater) that emitted into a QObject Qt was already tearing down —
+    surfacing as a bare `TypeError: only accepts 0 argument(s), N given!`
+    on the thread's own stderr, invisible unless something happened to be
+    watching the console. It was hiding in this project's own test suite:
+    running as root (true of most CI/sandbox containers) makes
+    `_apply_detection` kick off a second background thread
+    (`_read_sensors`) right after every scan, and `tests/test_smoke_gui.py`
+    `_drive_app()`'s watcher tore the window down the instant detection
+    landed without waiting for that second thread — every test run was
+    quietly racing it. `App._emit` (checked by `closeEvent`'s `_closing`
+    flag, with a `try/except RuntimeError` backstop for a report already in
+    flight the instant it ran) is what every `sig_*.emit()` call goes
+    through now; add a new one the same way. It cannot cancel the thread
+    itself — a `finally:`-block hardware restore (fan/backlight/fingerprint
+    LED) still runs — only stop that thread's next report from being the
+    reason an exception lands on someone else's stderr.
 
 ## Not yet verified (be skeptical, not confident)
 

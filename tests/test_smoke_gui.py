@@ -160,8 +160,14 @@ def _drive_app(timeout_ms):
 
     def watcher():
         # "Detecting…" is the pre-scan placeholder; anything else means the
-        # scan thread has reported back (success or fail-open).
-        if window.caps.get("model") != "Detecting…":
+        # scan thread has reported back (success or fail-open). Also wait
+        # for _busy: running as root (true in most CI/sandbox containers),
+        # _apply_detection kicks off a second background thread to read
+        # sensors right after detection finishes, and closing the window
+        # while that thread is still going raced it into emitting a signal
+        # into a torn-down QObject - the same race settle() below already
+        # guards against.
+        if window.caps.get("model") != "Detecting…" and not window._busy:
             snapshot()
             app.quit()
         else:
@@ -512,6 +518,39 @@ class TestBusyGuard(unittest.TestCase):
         self.assertEqual(window._editor_value("charge_limit"), before,
                          "the editor shows a value no command ever wrote")
 
+    def test_a_failed_preset_command_does_not_fill_the_row_with_a_lie(self):
+        window = self.window
+        if "charge_limit" not in window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+        limit_before = window._editor_value("charge_limit")
+        rate_before = window._editor_value("charge_rate")
+        window._exec = lambda args, timeout=60, echo=True: (1, "refused")
+        window.tool_preset("80", "1")
+        self.assertEqual(
+            window._editor_value("charge_limit"), limit_before,
+            "the row shows a value the device never confirmed setting")
+        self.assertEqual(
+            window._editor_value("charge_rate"), rate_before,
+            "the row shows a rate the device never confirmed setting")
+
+    def test_a_successful_preset_fills_from_the_confirmed_readback(self):
+        window = self.window
+        if "charge_limit" not in window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+        def fake_exec(args, timeout=60, echo=True):
+            if args == ["--charge-limit"]:
+                # The firmware clamped the request - the row must show
+                # what it actually confirmed, not the 80 that was asked
+                # for, which is the whole point of reading it back.
+                return (0, "Minimum 0%, Maximum 65%")
+            return (0, "")
+        window._exec = fake_exec
+        window.tool_preset("80", "1")
+        self.assertEqual(window._editor_value("charge_limit"), "65")
+        if "charge_rate" in window.settings_widgets:
+            self.assertEqual(window._editor_value("charge_rate"), "1")
+
 
 @unittest.skipUnless(CAN_RUN,
                      "PySide6 unavailable or no Qt platform plugin")
@@ -629,6 +668,21 @@ class TestBayOrdering(unittest.TestCase):
         ordered = self.window._ordered_by_bay(ports, chassis)
         self.assertEqual(len(ordered), 4)
 
+    def test_a_fifth_port_on_a_four_bay_chassis_is_not_dropped(self):
+        # The four named slots are all taken before a fifth, differently
+        # named port is even considered - it used to fall out of the
+        # `slots` list entirely once every slot was full, which silently
+        # threw a real port away instead of just showing it unordered.
+        ports = parsers.parse_ports(FOUR_BAY_PDPORTS)
+        extra = dict(ports[0])
+        extra["port"] = "4"
+        extra["name"] = "Extra Bay"
+        ports.append(extra)
+        chassis = device_images.chassis_for("Laptop 13")
+        ordered = self.window._ordered_by_bay(ports, chassis)
+        self.assertEqual(len(ordered), 5)
+        self.assertIn("Extra Bay", [p["name"] for p in ordered])
+
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestManufacturerTdpRange(unittest.TestCase):
@@ -658,6 +712,52 @@ class TestManufacturerTdpRange(unittest.TestCase):
         from frameworkgui import power
         self.assertRaises(power.PowerError,
                           self.window._check_manufacturer_range, "5")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestCloseDuringBackgroundWork(unittest.TestCase):
+    """A worker thread's next report must not crash once the window is
+    closing - see App._emit/closeEvent. Real trigger: closing the app while
+    Rescan, a Diagnostics tool, a Settings write or the updater is still
+    running on its daemon thread. Reproduced (before the fix) as a bare
+    `TypeError: only accepts 0 argument(s), 3 given!` out of _log whenever
+    this suite ran as root, because _apply_detection starts a second
+    background thread (_read_sensors) that _drive_app's old watcher did not
+    wait for before tearing the window down.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_closing_stops_further_log_and_status_reports(self):
+        window = self.window
+        before_status = window.status_message.text()
+        window.close()
+        self.assertTrue(window._closing)
+        # Exactly what a worker thread still running in the background
+        # would call next - none of these may raise, and none may reach a
+        # widget once closeEvent has run.
+        window._log("framework_tool", "late output\n")
+        window.set_status("late status")
+        window._emit(window.sig_tool_done)
+        self.assertEqual(window.status_message.text(), before_status)
+
+    def test_emit_survives_a_signal_that_raises_runtimeerror(self):
+        # The actual PySide6 failure mode - emitting into a QObject whose
+        # C++ side is already gone - without needing to force real object
+        # deletion, which is timing-dependent and not reproducible on
+        # demand.
+        class ExplodingSignal:
+            def emit(self, *args):
+                raise RuntimeError("Internal C++ object already deleted.")
+
+        self.window._emit(ExplodingSignal())  # must not raise
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")

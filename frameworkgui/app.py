@@ -584,6 +584,11 @@ class App(QMainWindow):
             and (IN_FLATPAK or shutil.which("pkexec") is not None))
         self._busy = False
         self._cancel = False
+        # Every command runs on a daemon thread (see run_tool/_rescan) that
+        # outlives the window if it is closed mid-run. Without this, that
+        # thread's next _log/set_status/etc. call emits a signal into a
+        # QObject Qt has already started tearing down - see _emit.
+        self._closing = False
 
         # Fail-open defaults: show every control until (or unless) detection
         # narrows things down.
@@ -953,6 +958,18 @@ class App(QMainWindow):
         self.pane.setVisible(not collapsed)
         self.combo_wrap.setVisible(collapsed)
         self.section_combo.setVisible(collapsed)
+
+    def closeEvent(self, event):
+        # Flipped before anything is torn down, so a daemon thread's next
+        # report through _emit (Rescan, a Diagnostics tool, a Settings
+        # write, the updater - anything started via run_tool or _rescan)
+        # sees it and stays quiet instead of emitting into a window Qt is
+        # already destroying. It cannot stop the thread itself - closing
+        # the window does not cancel it - but it stops that thread's next
+        # signal from being the reason a background exception lands on
+        # someone else's stderr.
+        self._closing = True
+        super().closeEvent(event)
 
     # ================= navigation =================
 
@@ -1582,16 +1599,20 @@ class App(QMainWindow):
         box.addWidget(panel)
 
     def _apply_preset(self, preset):
-        """Write a preset's values, and show them in the rows they landed in."""
-        # Same reason as _start_tool: fill the editors only once there is
-        # going to be a command, or a click during a running tool would show
-        # values that were never written.
+        """Run a preset's commands; the rows fill from what tool_preset
+        confirms actually landed, not from the values requested.
+
+        This used to paint both rows immediately, before the command that
+        was supposed to set them had even run — the same optimistic write
+        every other setting-writing path here (_get_setting_worker,
+        _auto_setting_worker) deliberately avoids, because pkexec can be
+        cancelled and a device can refuse a value. A cancelled or refused
+        preset left the rows claiming a limit the hardware never took.
+        """
         if self._busy:
             self.set_status("Busy — wait or cancel the running tool.")
             return
         values = preset["sets"]
-        for key, value in values.items():
-            self._on_fill(key, value)
         limit = values.get("charge_limit", "80")
         rate = values.get("charge_rate", "1")
         self.run_tool(lambda: self.tool_preset(limit, rate))
@@ -1680,7 +1701,7 @@ class App(QMainWindow):
             # this app has no way to predict.
             self._get_setting_worker(row, list(row["get"]))
         elif row["kind"] == "choice":
-            self.sig_fill.emit(row["key"], "auto")
+            self._emit(self.sig_fill, row["key"], "auto")
 
     def _editor_value(self, key):
         editor = self.settings_widgets.get(key)
@@ -1711,7 +1732,7 @@ class App(QMainWindow):
                                               parse_setting_value)
             value = reader(out)
             if value:
-                self.sig_fill.emit(row["key"], value)
+                self._emit(self.sig_fill, row["key"], value)
 
     def _on_fill(self, key, value):
         editor = self.settings_widgets.get(key)
@@ -2308,7 +2329,7 @@ class App(QMainWindow):
         result = updater.describe(release, os_name, __version__)
         self._log("updater", "Latest release: v{}\n"
                   .format(result["latest"] or "?"))
-        self.sig_update_checked.emit(result)
+        self._emit(self.sig_update_checked, result)
 
     def _apply_update_check(self, result):
         self._update_result = result
@@ -2383,7 +2404,7 @@ class App(QMainWindow):
             self._log("updater", "Download failed: {}\n".format(e), "warn")
             return
         self._log("updater", "Saved to {}\n".format(path), "ok")
-        self.sig_update_downloaded.emit(path)
+        self._emit(self.sig_update_downloaded, path)
 
     def _show_update_path(self, path):
         self._update_path = path
@@ -2583,7 +2604,7 @@ class App(QMainWindow):
             "firmware": firmware,
             "tool_version": parse_tool_version(version_text),
         }
-        self.sig_detected.emit(caps, detect_cpu(), extras)
+        self._emit(self.sig_detected, caps, detect_cpu(), extras)
 
     def _apply_detection(self, caps, cpu, extras):
         self.caps = caps
@@ -2704,7 +2725,7 @@ class App(QMainWindow):
         self._read_cards(readings)
         if self.caps.get("has_expansion_bay"):
             self._read_into(readings, "expansion_bay", ["--expansion-bay"])
-        self.sig_readings.emit(readings)
+        self._emit(self.sig_readings, readings)
 
     def _apply_readings(self, readings):
         self.readings.update(readings)
@@ -2830,7 +2851,15 @@ class App(QMainWindow):
         for index, slot in enumerate(slots):
             if slot is None and leftover:
                 slots[index] = leftover.pop(0)
-        return [port for port in slots if port is not None]
+        ordered = [port for port in slots if port is not None]
+        # A port that still doesn't fit once all four slots are taken (the
+        # CLI naming more ports than this chassis is believed to have)
+        # must not simply vanish - that would be exactly the silent data
+        # loss the fail-open rule elsewhere in this file exists to avoid.
+        # Appended in their own original order, same as the chassis layouts
+        # this reordering does not apply to at all.
+        ordered.extend(leftover)
+        return ordered
 
     def _fill_bays(self):
         """Paint the four bay rows from what the port commands reported.
@@ -3046,8 +3075,8 @@ class App(QMainWindow):
         rc, text = self._exec(args)
         self._log("framework_tool", text.strip() + "\n",
                   "output" if rc == 0 else "warn")
-        self.sig_status.emit("Done (exit {})".format(rc))
-        self.sig_tool_done.emit()
+        self._emit(self.sig_status, "Done (exit {})".format(rc))
+        self._emit(self.sig_tool_done)
 
     # ---- tool (multi-step) plumbing ----
 
@@ -3133,7 +3162,7 @@ class App(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self._append("\nTool error: {}\n".format(e))
         finally:
-            self.sig_tool_done.emit()
+            self._emit(self.sig_tool_done)
 
     def _tool_done(self):
         self._busy = False
@@ -3164,25 +3193,42 @@ class App(QMainWindow):
 
     # ---- output ----
 
+    def _emit(self, signal, *args):
+        """Emit a worker-thread signal, unless the window is closing.
+
+        Every command runs on a daemon thread (run_tool/_rescan) that
+        outlives the window when it is closed mid-run, and that thread's
+        next report would otherwise emit into a QObject Qt has already
+        started tearing down. `_closing` (set by closeEvent) catches the
+        common case; the try/except is the backstop for a report that was
+        already in flight the instant closeEvent ran.
+        """
+        if self._closing:
+            return
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
+
     def _append(self, text):
         self._log("framework_tool", text)
 
     def _log(self, stream, text, kind="output"):
-        self.sig_log.emit(stream, text, kind)
+        self._emit(self.sig_log, stream, text, kind)
 
     def _on_log(self, stream, text, kind):
         self.drawer.append(stream, text, kind)
 
     def set_status(self, msg):
-        self.sig_status.emit(msg)
+        self._emit(self.sig_status, msg)
 
     def _on_status(self, msg):
         self.status_message.setText(msg)
 
     def _progress(self, index, step, total, name, value, fraction):
-        self.sig_progress.emit(
-            {"index": index, "step": step, "total": total, "name": name,
-             "value": value, "fraction": fraction})
+        self._emit(self.sig_progress,
+                   {"index": index, "step": step, "total": total,
+                    "name": name, "value": value, "fraction": fraction})
 
     def _on_progress(self, payload):
         self.tool_detail.update_step(
@@ -3449,7 +3495,7 @@ class App(QMainWindow):
             self._append("Neither port command named a USB-C port on this "
                          "board.\n")
             return
-        self.sig_readings.emit({"ports": ports})
+        self._emit(self.sig_readings, {"ports": ports})
         for p in ports:
             title = "Port {}{}".format(
                 p["port"], " ({})".format(p["name"]) if p.get("name") else "")
@@ -3578,12 +3624,25 @@ class App(QMainWindow):
         rc, out = self._exec(["--charge-limit", str(limit)])
         self._append(out.strip() + "\n" if out.strip()
                      else "Charge limit → {}% (exit {})\n".format(limit, rc))
+        if rc == 0:
+            # Re-read rather than assume it stuck - a preset writes two
+            # rows instead of one, but that is not a reason to skip the
+            # confirm-before-fill rule every other row here follows.
+            vrc, vout = self._exec(["--charge-limit"])
+            if vout.strip():
+                self._append("Verify: " + vout.strip() + "\n")
+            if vrc == 0:
+                value = parse_charge_limit(vout)
+                if value:
+                    self._emit(self.sig_fill, "charge_limit", value)
         rc, out = self._exec(["--charge-rate-limit", rate])
         self._append(out.strip() + "\n" if out.strip()
                      else "Rate limit → {}C (exit {})\n".format(rate, rc))
-        rc, out = self._exec(["--charge-limit"])
-        if rc == 0 and out.strip():
-            self._append("Verify: " + out.strip() + "\n")
+        if rc == 0:
+            # framework_tool has no read for this row ("get": None) - the
+            # exit code is the best confirmation there is, the same limit
+            # _auto_setting_worker accepts for a row with no get.
+            self._emit(self.sig_fill, "charge_rate", rate)
 
 
 def load_app_icon():
