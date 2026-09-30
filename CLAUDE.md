@@ -438,6 +438,25 @@ failure mode to watch for.
   row stays lit and the bar animates for the rest of the session. Guard at
   the top of the handler. `tests/test_smoke_gui.TestBusyGuard` covers it.
 
+- **"Run all safe diagnostics" is one `run_tool` call, not N of them.**
+  `_run_all_safe_diagnostics` reads every listed tool's params off its own
+  editor on the UI thread (same rule as a single tool — a worker must never
+  touch a widget) and freezes them into a plan, then hands the whole plan
+  to one `run_tool(lambda: self._run_all_worker(plan))`. `_run_all_worker`
+  calls each `tool_<key>` method directly, in order, checking `self._cancel`
+  between them — the same flag and the same per-tool `finally:`-block
+  restores every individual tool already has, unrelated to how it was
+  invoked. Danger tools (`fan_burst`) are filtered out of the plan before
+  the confirm dialog is even built. `tool_detail`'s step grid is
+  deliberately **not** reused here: a sub-tool's own `_progress` calls index
+  into it by its own step count, which would collide with a chain-level
+  grid sized to the number of tools instead. Progress during a chain shows
+  through row highlighting (`sig_chain_step` → `_on_chain_step`) and the
+  status bar instead, and Cancel is the "Run all safe diagnostics" button
+  itself, relabelled and reconnected to `_request_cancel` for the run's
+  duration — restored by `_tool_done`, which already fires exactly once at
+  the end of any `run_tool` call, chain or single tool.
+
 - **Expansion-card marks are drawn, not shipped.** `module_icons.py` holds
   an 18×18 stroke path per module type, in the same idiom as the rail icons,
   so they tint to the port's state and stay sharp at any scale with no image

@@ -1324,6 +1324,132 @@ class TestPaneItemHover(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRunAllSafeDiagnostics(unittest.TestCase):
+    """The Diagnostics pane's chain runner. The worker-level tests call
+    _run_all_worker directly with synthetic tools rather than the real
+    ones - several real diagnostics sleep for tens of seconds by design
+    (fan_test, thermal_monitor), which their own single-tool tests already
+    cover; this class tests the sequencing/cancel/button-state logic in
+    isolation from what any individual tool actually does.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def fake_tool(self, key, danger=False):
+        return {"key": key, "label": "Fake " + key, "danger": danger,
+               "mode": None, "steps": None, "requires": None}
+
+    def test_the_button_starts_with_its_default_label(self):
+        self.assertEqual(self.window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+    def test_danger_tools_are_excluded_from_the_plan(self):
+        from unittest import mock
+        window = self.window
+        window._ask = mock.Mock(return_value=False)  # decline before it runs
+        window._run_all_safe_diagnostics()
+        prompt = window._ask.call_args[0][1]
+        # The prompt lists every tool it will run - the one danger tool
+        # (fan_burst, "Fan max burst") must never be named there.
+        self.assertNotIn("Fan max burst", prompt)
+
+    def test_declining_the_confirmation_runs_nothing(self):
+        from unittest import mock
+        window = self.window
+        window._ask = mock.Mock(return_value=False)
+        window.run_tool = mock.Mock()
+        window._run_all_safe_diagnostics()
+        window.run_tool.assert_not_called()
+
+    def test_the_worker_runs_each_tool_once_in_order(self):
+        window = self.window
+        order = []
+        window.tool_test_a = lambda: order.append("a")
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["a", "b"])
+
+    def test_a_tool_error_does_not_stop_the_rest_of_the_chain(self):
+        window = self.window
+
+        def boom():
+            raise RuntimeError("stub failure")
+        order = []
+        window.tool_test_a = boom
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["b"])
+
+    def test_cancelling_mid_chain_stops_the_remaining_tools(self):
+        window = self.window
+        order = []
+
+        def cancel_then_record():
+            window._cancel = True
+            order.append("a")
+        window.tool_test_a = cancel_then_record
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["a"])
+
+    def test_tool_values_reflect_the_tool_currently_running(self):
+        window = self.window
+        seen = {}
+        window.tool_test_a = lambda: seen.setdefault("a", dict(
+            window._tool_values))
+        plan = [(self.fake_tool("test_a"), {"dwell": 3})]
+        window._run_all_worker(plan)
+        self.assertEqual(seen["a"], {"dwell": 3})
+
+    def test_on_chain_step_highlights_only_the_current_row(self):
+        window = self.window
+        if len(window.tool_rows) < 2:
+            self.skipTest("not enough diagnostics on this detected model")
+        keys = list(window.tool_rows)
+        tool = next(t for t in fg.navigation.TOOLS if t["key"] == keys[0])
+        window._on_chain_step((tool, 0, 2))
+        self.assertEqual(window.tool_rows[keys[0]].property("running"),
+                         "true")
+        self.assertEqual(window.tool_rows[keys[1]].property("running"),
+                         "false")
+
+    def test_on_chain_step_none_clears_every_row(self):
+        window = self.window
+        for frame in window.tool_rows.values():
+            frame.setProperty("running", "true")
+        window._on_chain_step(None)
+        for frame in window.tool_rows.values():
+            self.assertEqual(frame.property("running"), "false")
+
+    def test_tool_done_restores_the_button_after_a_chain_run(self):
+        window = self.window
+        window._running_all = True
+        window.run_all_btn.setText("Cancel run-all")
+        window._tool_done()
+        self.assertFalse(window._running_all)
+        self.assertEqual(window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+    def test_tool_done_does_not_touch_the_button_for_an_ordinary_tool(self):
+        window = self.window
+        window._running_all = False
+        window.run_all_btn.setText("Run all safe diagnostics")
+        window._tool_done()
+        self.assertEqual(window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestBayLabels(unittest.TestCase):
     """A person's own note for a bay - the only way this app can ever name
     a passive USB-C/USB-A card, since the CLI cannot identify one. Purely

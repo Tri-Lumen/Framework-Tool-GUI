@@ -604,6 +604,7 @@ class App(QMainWindow):
     sig_update_checked = Signal(object)
     sig_update_downloaded = Signal(str)
     sig_report_saved = Signal(str)
+    sig_chain_step = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -642,6 +643,7 @@ class App(QMainWindow):
         # defaults rather than what this user actually ran.
         self._custom_history = []
         self._last_report_path = None
+        self._running_all = False
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -685,7 +687,8 @@ class App(QMainWindow):
                 (self.sig_fill, self._on_fill),
                 (self.sig_update_checked, self._apply_update_check),
                 (self.sig_update_downloaded, self._show_update_path),
-                (self.sig_report_saved, self._show_report_path)):
+                (self.sig_report_saved, self._show_report_path),
+                (self.sig_chain_step, self._on_chain_step)):
             signal.connect(slot)
 
         if IS_LINUX and not is_root() and not self.use_pkexec:
@@ -1380,6 +1383,17 @@ class App(QMainWindow):
             box, parent, "Diagnostics",
             note="Multi-step tools issue many commands — run elevated to "
                  "avoid repeated prompts.")
+        run_all_row = QHBoxLayout()
+        run_all_row.setSpacing(theme.SPACE[4])
+        self.run_all_btn = QPushButton("Run all safe diagnostics", parent)
+        self.run_all_btn.setProperty("role", "accent")
+        self.run_all_btn.clicked.connect(self._run_all_safe_diagnostics)
+        run_all_row.addWidget(self.run_all_btn)
+        run_all_row.addWidget(label(
+            "Every diagnostic below in sequence, skipping any marked "
+            "danger.", "caption", parent))
+        run_all_row.addStretch(1)
+        box.addLayout(run_all_row)
         self.report_row = QHBoxLayout()
         self.report_row.setSpacing(theme.SPACE[3])
         box.addLayout(self.report_row)
@@ -3574,10 +3588,86 @@ class App(QMainWindow):
                 frame.setProperty("running", "false")
                 widgets.restyle(frame)
             self._current_tool = None
+        if self._running_all:
+            self._running_all = False
+            for frame in self.tool_rows.values():
+                frame.setProperty("running", "false")
+                widgets.restyle(frame)
+            if hasattr(self, "run_all_btn"):
+                self.run_all_btn.setText("Run all safe diagnostics")
+                self.run_all_btn.clicked.disconnect()
+                self.run_all_btn.clicked.connect(
+                    self._run_all_safe_diagnostics)
 
     def _request_cancel(self):
         self._cancel = True
         self.set_status("Cancelling after current step…")
+
+    # ---- run every non-destructive diagnostic in sequence ----
+
+    def _run_all_safe_diagnostics(self):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        tools = [t for t in navigation.tools_for(self.caps)
+                if not t.get("danger")]
+        if not tools:
+            return
+        if not self._ask(
+                "Run all safe diagnostics",
+                "Runs these {} diagnostics in sequence, each restoring its "
+                "own state when it finishes: {}.\n\nTools marked danger "
+                "are excluded — run those individually.\n\nProceed?".format(
+                    len(tools), ", ".join(t["label"] for t in tools))):
+            return
+        # Every tool's params are read off its own editor here, on the UI
+        # thread, and frozen into the plan - a worker thread must never
+        # touch a widget, the same rule _start_tool follows for one tool.
+        plan = [(tool, self.tool_params(tool)) for tool in tools]
+        self.tool_detail.setVisible(False)
+        self._running_all = True
+        self.run_all_btn.setText("Cancel run-all")
+        self.run_all_btn.clicked.disconnect()
+        self.run_all_btn.clicked.connect(self._request_cancel)
+        self.run_tool(lambda: self._run_all_worker(plan))
+
+    def _run_all_worker(self, plan):
+        total = len(plan)
+        for index, (tool, params) in enumerate(plan):
+            if self._cancel:
+                break
+            # Plain attribute writes, read back by _param() on this same
+            # worker thread as each tool runs - not a widget, so this is
+            # not the thing the no-touching-widgets rule is about.
+            self._tool_values = params
+            self._emit(self.sig_chain_step, (tool, index, total))
+            self._append("\n=== [{}/{}] {} ===\n".format(
+                index + 1, total, tool["label"]))
+            method = getattr(self, "tool_" + tool["key"], None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception as e:  # noqa: BLE001
+                self._append("\nTool error running {}: {}\n".format(
+                    tool["label"], e))
+        self._emit(self.sig_chain_step, None)
+        self._append("\n=== Run all safe diagnostics {} ===\n".format(
+            "cancelled" if self._cancel else "finished"))
+
+    def _on_chain_step(self, payload):
+        if payload is None:
+            for frame in self.tool_rows.values():
+                frame.setProperty("running", "false")
+                widgets.restyle(frame)
+            return
+        tool, index, total = payload
+        for key, frame in self.tool_rows.items():
+            frame.setProperty("running", "true" if key == tool["key"]
+                              else "false")
+            widgets.restyle(frame)
+        self.set_status("Running diagnostic {} of {}: {}".format(
+            index + 1, total, tool["label"]))
 
     def _sleep(self, seconds):
         """Interruptible sleep; returns False if cancelled."""
