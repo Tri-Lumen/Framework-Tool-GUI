@@ -634,6 +634,10 @@ class App(QMainWindow):
         self._last_scan_at = None
         self._update_result = None
         self._update_path = None
+        # Session-only, most-recent-first, capped and deduplicated below -
+        # separate from navigation.RECENT_SUGGESTIONS, which are curated
+        # defaults rather than what this user actually ran.
+        self._custom_history = []
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -1175,6 +1179,12 @@ class App(QMainWindow):
         self.bay_source = label("port state, in CLI port order", "caption",
                                 panel)
         header.addWidget(self.bay_source)
+        save_diagram = QPushButton("Save diagram…", panel)
+        save_diagram.setProperty("role", "compact")
+        save_diagram.setToolTip(
+            "Save the chassis diagram as a PNG, for a support request")
+        save_diagram.clicked.connect(self._save_chassis_image)
+        header.addWidget(save_diagram)
         panel.body.addLayout(header)
 
         bays = QHBoxLayout()
@@ -1281,6 +1291,15 @@ class App(QMainWindow):
 
     def _copy_device_summary(self):
         QGuiApplication.clipboard().setText(self._device_summary_text())
+
+    def _save_chassis_image(self):
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save chassis diagram", "chassis.png", "PNG images (*.png)")
+        if not path:
+            return
+        if not self.chassis.grab().save(path, "PNG"):
+            self._warn("Could not save",
+                      "The image could not be written to {}.".format(path))
 
     def _has_gpu_module(self):
         """True when the expansion bay reported a Graphics Module.
@@ -1605,6 +1624,23 @@ class App(QMainWindow):
             box, parent, "Settings",
             "Only the controls this mainboard supports are shown. Detection "
             "failing shows everything rather than guessing.")
+        backup_row = QHBoxLayout()
+        backup_row.setSpacing(theme.SPACE[3])
+        export_btn = QPushButton("Export settings…", parent)
+        export_btn.setProperty("role", "compact")
+        export_btn.setToolTip(
+            "Save every row's current field value to a file")
+        export_btn.clicked.connect(self._export_settings)
+        backup_row.addWidget(export_btn)
+        import_btn = QPushButton("Import settings…", parent)
+        import_btn.setProperty("role", "compact")
+        import_btn.setToolTip(
+            "Fill rows from a file - nothing is sent to the device until "
+            "you press each row's own Set")
+        import_btn.clicked.connect(self._import_settings)
+        backup_row.addWidget(import_btn)
+        backup_row.addStretch(1)
+        box.addLayout(backup_row)
         self._preset_panel(box, parent)
         panel = widgets.Panel(parent)
         # The rows carry their own vertical padding, so the panel adds none:
@@ -1806,6 +1842,52 @@ class App(QMainWindow):
                 editor.setCurrentIndex(index)
         elif editor is not None:
             editor.setText(value)
+
+    def _export_settings(self):
+        """Every row's current field value to a file — a local backup, not
+        a read of the device. Useful before trying something risky, or for
+        carrying values between two machines of the same model."""
+        data = {key: self._editor_value(key)
+               for key in self.settings_widgets}
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export settings", "framework-gui-settings.json",
+            "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, sort_keys=True)
+        except OSError as e:
+            self._warn("Could not export", str(e))
+
+    def _import_settings(self):
+        """Fill rows from a file. Never applies anything by itself — a
+        row a device does not have (a different model, or wrong file) is
+        skipped rather than guessed at, and every row still needs its own
+        Set before the device sees any of it, same as typing the value in
+        by hand."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import settings", "", "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:
+            self._warn("Could not import", str(e))
+            return
+        if not isinstance(data, dict):
+            self._warn("Could not import", "Not a settings file.")
+            return
+        filled = 0
+        for key, value in data.items():
+            if key in self.settings_widgets and isinstance(value, str):
+                self._on_fill(key, value)
+                filled += 1
+        self.set_status(
+            "Imported {} field(s) — review, then press each row's own Set "
+            "to apply.".format(filled) if filled
+            else "Nothing in that file matched a row on this device.")
 
     def _set_setting(self, row):
         value = self._editor_value(row["key"])
@@ -2621,6 +2703,18 @@ class App(QMainWindow):
             recent.addWidget(chip)
         recent.addStretch(1)
         panel.body.addLayout(recent)
+
+        # Hidden until something has actually been run - navigation.py's
+        # RECENT_SUGGESTIONS above are curated defaults, this is what this
+        # user actually typed, and an empty "History" row before the first
+        # command would say nothing useful.
+        self.history_wrap = QWidget(panel)
+        self.history_layout = QHBoxLayout(self.history_wrap)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(theme.SPACE[3])
+        panel.body.addWidget(self.history_wrap)
+        self._refresh_history_row()
+
         panel.body.addWidget(rule(panel))
 
         bottom = QHBoxLayout()
@@ -2649,6 +2743,35 @@ class App(QMainWindow):
             "host.", "caption", binary_panel), 1)
         binary_panel.body.addLayout(binary_row)
         box.addWidget(binary_panel)
+
+    HISTORY_LIMIT = 8
+
+    def _remember_custom_command(self, text):
+        if not text:
+            return
+        if text in self._custom_history:
+            self._custom_history.remove(text)
+        self._custom_history.insert(0, text)
+        del self._custom_history[self.HISTORY_LIMIT:]
+        self._refresh_history_row()
+
+    def _refresh_history_row(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.history_wrap.setVisible(bool(self._custom_history))
+        if not self._custom_history:
+            return
+        self.history_layout.addWidget(
+            label("History", "caption", self.history_wrap))
+        for entry in self._custom_history:
+            chip = QPushButton(entry, self.history_wrap)
+            chip.setProperty("role", "link")
+            chip.clicked.connect(
+                lambda _=False, s=entry: self.custom.setText(s))
+            self.history_layout.addWidget(chip)
+        self.history_layout.addStretch(1)
 
     def _set_binary(self, text):
         self.binary = text.strip() or "framework_tool"
@@ -3151,6 +3274,7 @@ class App(QMainWindow):
         if "--console" in args and "follow" in args:
             self._warn("Blocked", "--console follow never exits; use 'recent'.")
             return
+        self._remember_custom_command(self.custom.text().strip())
         self.run(args)
 
     def run(self, args):

@@ -791,6 +791,189 @@ class TestRailButtonHover(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestSettingsBackup(unittest.TestCase):
+    """Export/Import on the Settings pane - a local backup of the field
+    values, never a read of or write to the device by itself."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        if "charge_limit" not in self.window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_export_writes_every_rows_current_value(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["charge_limit"].setText("77")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                window._export_settings()
+            with open(target, encoding="utf-8") as fh:
+                data = json.load(fh)
+        self.assertEqual(data["charge_limit"], "77")
+
+    def test_import_fills_matching_rows_without_running_anything(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump({"charge_limit": "55",
+                          "not_a_real_row": "x"}, fh)
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        self.assertEqual(window._editor_value("charge_limit"), "55")
+        window.run.assert_not_called()
+
+    def test_import_ignores_a_non_string_value(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        before = window._editor_value("charge_limit")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump({"charge_limit": 80}, fh)  # not a string
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        self.assertEqual(window._editor_value("charge_limit"), before)
+
+    def test_import_of_a_non_dict_file_warns_instead_of_crashing(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window._warn = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump([1, 2, 3], fh)
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        window._warn.assert_called_once()
+
+    def test_import_of_invalid_json_warns_instead_of_crashing(self):
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window._warn = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("{not json,")
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        window._warn.assert_called_once()
+
+    def test_cancelling_export_or_import_does_nothing(self):
+        from unittest import mock
+        window = self.window
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            window._export_settings()  # must not raise
+        with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                               return_value=("", "")):
+            window._import_settings()  # must not raise
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestCustomCommandHistory(unittest.TestCase):
+    """The Console pane's History row - what this user actually ran,
+    distinct from navigation.RECENT_SUGGESTIONS' curated defaults."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def chip_texts(self):
+        return [self.window.history_layout.itemAt(i).widget().text()
+               for i in range(self.window.history_layout.count())
+               if self.window.history_layout.itemAt(i).widget() is not None]
+
+    def test_history_is_hidden_until_something_has_run(self):
+        # isVisible() reflects the whole ancestor chain, and these tests
+        # never call window.show() - isHidden() is the widget's own
+        # explicit flag, which is what setVisible() in _refresh_history_row
+        # actually controls.
+        self.assertTrue(self.window.history_wrap.isHidden())
+
+    def test_running_a_command_shows_it_in_history(self):
+        self.window._remember_custom_command("--thermal")
+        self.assertFalse(self.window.history_wrap.isHidden())
+        self.assertIn("--thermal", self.chip_texts())
+
+    def test_repeating_a_command_moves_it_to_the_front_without_duplicating(self):
+        window = self.window
+        window._remember_custom_command("--versions")
+        window._remember_custom_command("--thermal")
+        window._remember_custom_command("--versions")
+        self.assertEqual(window._custom_history,
+                         ["--versions", "--thermal"])
+
+    def test_history_is_capped(self):
+        window = self.window
+        for i in range(window.HISTORY_LIMIT + 3):
+            window._remember_custom_command("--cmd{}".format(i))
+        self.assertEqual(len(window._custom_history), window.HISTORY_LIMIT)
+        # Most recent first, oldest fell off the end.
+        self.assertEqual(window._custom_history[0],
+                         "--cmd{}".format(window.HISTORY_LIMIT + 2))
+
+    def test_a_history_chip_fills_the_custom_command_field(self):
+        window = self.window
+        window._remember_custom_command("--pdports")
+        chip = next(window.history_layout.itemAt(i).widget()
+                   for i in range(window.history_layout.count())
+                   if window.history_layout.itemAt(i).widget() is not None
+                   and window.history_layout.itemAt(i).widget().text()
+                   == "--pdports")
+        chip.click()
+        self.assertEqual(window.custom.text(), "--pdports")
+
+    def test_run_custom_records_history_before_running(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.custom.setText("--power -vv")
+        window._run_custom()
+        self.assertIn("--power -vv", window._custom_history)
+        window.run.assert_called_once_with(["--power", "-vv"])
+
+    def test_a_blocked_command_is_not_remembered(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()  # a real QMessageBox.warning() would block
+        window.custom.setText("--flash-ec")
+        window._run_custom()
+        self.assertNotIn("--flash-ec", window._custom_history)
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestRgbValidation(unittest.TestCase):
     """The RGB row's hex field is free text a person typed, not CLI output -
     _set_rgb_all has to refuse something that is not a 6-digit hex colour
@@ -1025,9 +1208,10 @@ class TestDrawerCopy(unittest.TestCase):
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestDeviceSummary(unittest.TestCase):
-    """The Overview's "Copy summary" button - a bug-report paste of the
-    board/CPU/firmware detail plus the six stat cards, without asking
-    someone to retype what is on their screen."""
+    """The Overview's two support-request actions: "Copy summary" (a
+    bug-report paste of the board/CPU/firmware detail plus the six stat
+    cards, without asking someone to retype what is on their screen) and
+    "Save diagram…" (the chassis/bay drawing as a PNG)."""
 
     def setUp(self):
         self.app = QApplication.instance() or QApplication([])
@@ -1037,6 +1221,24 @@ class TestDeviceSummary(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
+
+    def test_save_diagram_writes_a_png(self):
+        import tempfile
+        from unittest import mock
+        window = self.window
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "chassis.png")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                window._save_chassis_image()
+            self.assertTrue(os.path.isfile(target))
+            self.assertGreater(os.path.getsize(target), 0)
+
+    def test_cancelling_save_diagram_writes_nothing(self):
+        from unittest import mock
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            self.window._save_chassis_image()  # must not raise
 
     def test_summary_includes_board_detail_and_stat_cards(self):
         window = self.window

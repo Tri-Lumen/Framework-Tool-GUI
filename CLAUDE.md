@@ -257,9 +257,13 @@ failure mode to watch for.
   `framework_tool`, `ryzenadj`, `apt-get` — with its output after it. Lines
   are inserted with a character format rather than as HTML so the CLI's text
   is never reformatted, which the design is explicit about. Height is
-  dragged with the grabber, clamped to 70–460px, and persisted. A "copy"
-  button sits beside wrap/clear so a tab's raw output can be pasted into a
-  bug report without a mouse-drag selection across a scrolled terminal.
+  dragged with the grabber, clamped to 70–460px, and persisted. "copy" and
+  "save" sit beside wrap/clear so a tab's raw output can go into a bug
+  report — pasted, or kept as a file — without a mouse-drag selection
+  across a scrolled terminal. The Overview's "Copy summary" button
+  (`_device_summary_text`) is the same instinct applied to the board/CPU/
+  firmware detail plus the six stat cards, and "Save diagram…" next to the
+  Expansion bays panel saves the chassis drawing itself as a PNG.
 
 - **There is no background refresh, so the app says when it last looked.**
   The six-card grid and the bay panel only change on "Rescan device" (or the
@@ -426,7 +430,34 @@ failure mode to watch for.
   `--charge-limit` re-read for the row that has one, the set command's own
   exit code for `charge_rate` (which has none — `"get": None` on that row),
   the same standard `_get_setting_worker`/`_auto_setting_worker` already
-  held every other row to.
+  held every other row to. The pane's Export/Import buttons
+  (`_export_settings`/`_import_settings`) write and read every row's
+  current field value as JSON — a local backup, never a read of or write to
+  the device. Import only fills editors (`_on_fill`, the same path a Get
+  uses): a row this device does not have, or a combo value that is not one
+  of its choices, is skipped rather than guessed at, and nothing reaches
+  the device until each row's own Set is pressed, same as typing the value
+  in by hand.
+
+- **The RGB row's hex field is free text a person typed, not CLI output.**
+  `_set_rgb_all` used to hand whatever was in the field straight to
+  `--rgbkbd`; it now refuses anything that is not a 6-digit hex colour
+  (`App.RE_HEX_COLOUR`) rather than running the command with a bogus
+  argument and letting framework_tool be the one to complain.
+
+- **The Fans pane's sensor list sorts hottest-first.** `--thermal`'s own
+  order is neither sorted nor stable between boards, so the one reading
+  worth noticing was sometimes buried below several others. `_fill_sensors`
+  keeps the existing `SensorRow` widgets (never rebuilt, so `TestBusyGuard`-
+  style state loss does not apply here) and `_reorder_sensors` repositions
+  them in the layout with `removeWidget`/`addWidget` on every read.
+
+- **The Console pane remembers what you actually ran, apart from the
+  curated defaults.** `navigation.RECENT_SUGGESTIONS` is a fixed list;
+  `App._custom_history` is session-only, most-recent-first, deduplicated,
+  and capped at `HISTORY_LIMIT` (8) — rendered as its own "History" row,
+  hidden until the first command runs so an empty row does not sit there
+  saying nothing.
 
 - **Read a setting with the reader its row names.** framework_tool prints
   more than one number in some of these blocks and the generic reader took
