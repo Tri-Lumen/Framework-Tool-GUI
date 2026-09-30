@@ -750,3 +750,81 @@ class TestDrawerCopy(unittest.TestCase):
         self.window.drawer._copy()
         self.assertIn("hello from a test",
                       fg.QGuiApplication.clipboard().text())
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestUpdater(unittest.TestCase):
+    """The Setup pane's self-updater: check and download, never install.
+
+    Every test drives `_apply_update_check`/`_show_update_path` directly
+    with canned results rather than a real network call - the same
+    boundary `updater.describe()` itself is tested at, and the same
+    reason `TestManufacturerTdpRange` calls `_check_manufacturer_range`
+    directly instead of clicking a button that spawns a worker thread.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def result(self, newer, asset_url="https://example/asset",
+               latest="9.9.9"):
+        return {"current": fg.__version__, "latest": latest, "newer": newer,
+               "html_url": "https://example/release",
+               "asset_name": "FrameworkGUI-Setup.exe",
+               "asset_url": asset_url if newer else None}
+
+    def action_texts(self):
+        """What `update_actions` currently holds, read from the layout
+        itself rather than findChildren() - a widget `_rebuild_update_actions`
+        just took out with deleteLater() stays a live child of the panel
+        until the event loop actually turns, so findChildren() can still
+        report it. The layout's own contents are what is actually shown."""
+        layout = self.window.update_actions
+        return [layout.itemAt(i).widget().text() for i in range(layout.count())]
+
+    def test_setup_shows_the_current_version_and_a_check_button(self):
+        page = self.window.pages["setup"]
+        self.assertIn("Check for updates", buttons_in(page))
+        self.assertIn("v" + fg.__version__, labels_in(page))
+
+    def test_an_available_update_offers_a_download_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.assertIn("Download v9.9.9",
+                      buttons_in(self.window.pages["setup"]))
+        self.assertIn("Release notes",
+                      buttons_in(self.window.pages["setup"]))
+
+    def test_being_up_to_date_offers_no_download_button(self):
+        self.window.sig_update_checked.emit(
+            self.result(newer=False, latest=fg.__version__))
+        texts = self.action_texts()
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("Release notes", texts)
+        self.assertIn(fg.__version__, self.window.update_status.text())
+
+    def test_a_release_with_no_matching_asset_says_so_instead_of_a_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True,
+                                                         asset_url=None))
+        texts = self.action_texts()
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("No FrameworkGUI-Setup.exe in that release yet.", texts)
+
+    def test_a_finished_download_shows_a_copyable_path_and_no_longer_the_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        texts = self.action_texts()
+        self.assertIn("Copy path", texts)
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("/tmp/FrameworkGUI-Setup.exe", texts)
+
+    def test_rechecking_clears_a_previous_download_state(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.assertIn("Download v9.9.9", self.action_texts())

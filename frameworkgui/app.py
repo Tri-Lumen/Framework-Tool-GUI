@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import (
+    __version__,
     app_icon,
     appstate,
     backdrop,
@@ -91,6 +92,7 @@ from . import (
     navigation,
     power,
     theme,
+    updater,
     widgets,
 )
 from .parsers import (
@@ -571,6 +573,8 @@ class App(QMainWindow):
     sig_progress = Signal(object)
     sig_readings = Signal(object)
     sig_fill = Signal(str, str)
+    sig_update_checked = Signal(object)
+    sig_update_downloaded = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -597,6 +601,8 @@ class App(QMainWindow):
         self.tool_version = ""
         self.readings = {}
         self._last_scan_at = None
+        self._update_result = None
+        self._update_path = None
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -636,7 +642,9 @@ class App(QMainWindow):
                 (self.sig_tool_done, self._tool_done),
                 (self.sig_progress, self._on_progress),
                 (self.sig_readings, self._apply_readings),
-                (self.sig_fill, self._on_fill)):
+                (self.sig_fill, self._on_fill),
+                (self.sig_update_checked, self._apply_update_check),
+                (self.sig_update_downloaded, self._show_update_path)):
             signal.connect(slot)
 
         if IS_LINUX and not is_root() and not self.use_pkexec:
@@ -2199,6 +2207,7 @@ class App(QMainWindow):
             "This app only ever runs other programs. Nothing is installed "
             "without you clicking Install and confirming the exact command "
             "first.")
+        self._build_update_panel(box, parent)
         os_name = "windows" if IS_WINDOWS else "linux"
         manager = deps.linux_manager(shutil.which) if IS_LINUX else None
         for dep in deps.relevant(os_name, self.cpu.get("vendor")):
@@ -2233,6 +2242,152 @@ class App(QMainWindow):
         recheck = QPushButton("Re-check what is installed", parent)
         recheck.clicked.connect(self._rescan)
         box.addWidget(recheck, 0, Qt.AlignLeft)
+
+    # ---- self-update: check and download, never install or run ----
+    #
+    # Same rule as every other Setup entry: nothing runs without a click and
+    # a confirm dialog naming exactly what will happen. The one thing this
+    # app has never done — execute a downloaded installer on the user's
+    # behalf, see CLAUDE.md's "Deliberately out of scope" — still does not
+    # happen here: a successful download ends at a path and a Copy button,
+    # not a launch.
+
+    def _build_update_panel(self, box, parent):
+        panel = widgets.Panel(parent)
+        self.update_panel = panel
+        header = QHBoxLayout()
+        header.setSpacing(theme.SPACE[4])
+        header.addWidget(label("Framework System GUI", "name", panel))
+        header.addWidget(widgets.Badge("v" + __version__, "muted", panel))
+        header.addStretch(1)
+        check = QPushButton("Check for updates", panel)
+        check.clicked.connect(self._check_for_update)
+        header.addWidget(check)
+        panel.body.addLayout(header)
+        self.update_status = label(self._update_status_text(), "caption",
+                                   panel)
+        self.update_status.setWordWrap(True)
+        panel.body.addWidget(self.update_status)
+        self.update_actions = QHBoxLayout()
+        self.update_actions.setSpacing(theme.SPACE[3])
+        panel.body.addLayout(self.update_actions)
+        box.addWidget(panel)
+        self._rebuild_update_actions()
+
+    def _update_status_text(self):
+        result = self._update_result
+        if result is None:
+            return ("Checks GitHub for a newer release of this app. "
+                    "Downloads only — nothing here installs or runs "
+                    "anything on its own.")
+        if result["latest"] is None:
+            return "Could not read a version number from the latest release."
+        if result["newer"]:
+            return "v{} is available (you have v{}).".format(
+                result["latest"], result["current"])
+        return "You're on the latest release (v{}).".format(result["current"])
+
+    def _check_for_update(self):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        self.run_tool(self._update_check_worker)
+
+    def _update_check_worker(self):
+        os_name = "windows" if IS_WINDOWS else "linux"
+        url = deps.github_latest_api(updater.REPO)
+        self._log("updater", "=== Checking for updates ===\n$ GET {}\n"
+                  .format(url), "command")
+        try:
+            body = deps.fetch_text(url, timeout=20)
+            release = json.loads(body)
+        except Exception as e:  # noqa: BLE001
+            self._log("updater", "Could not check for updates: {}\n"
+                      .format(e), "warn")
+            return
+        result = updater.describe(release, os_name, __version__)
+        self._log("updater", "Latest release: v{}\n"
+                  .format(result["latest"] or "?"))
+        self.sig_update_checked.emit(result)
+
+    def _apply_update_check(self, result):
+        self._update_result = result
+        self._update_path = None
+        self.update_status.setText(self._update_status_text())
+        self._rebuild_update_actions()
+
+    def _rebuild_update_actions(self):
+        while self.update_actions.count():
+            item = self.update_actions.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        result = self._update_result
+        if not result:
+            return
+        if result.get("html_url"):
+            notes = QPushButton("Release notes", self.update_panel)
+            notes.clicked.connect(
+                lambda _=False, u=result["html_url"]: self._open_url(u))
+            self.update_actions.addWidget(notes)
+        if result["newer"] and self._update_path is None:
+            if result.get("asset_url"):
+                download = QPushButton(
+                    "Download v{}".format(result["latest"]),
+                    self.update_panel)
+                download.setProperty("role", "accent")
+                download.clicked.connect(
+                    lambda _=False, r=result: self._start_update_download(r))
+                self.update_actions.addWidget(download)
+            else:
+                self.update_actions.addWidget(label(
+                    "No {} in that release yet.".format(
+                        result.get("asset_name") or "matching download"),
+                    "caption", self.update_panel))
+        if self._update_path:
+            badge = widgets.Badge(self._update_path, "ok", self.update_panel,
+                                  elide=theme.BADGE_PATH_WIDTH)
+            self.update_actions.addWidget(badge)
+            copy = QPushButton("Copy path", self.update_panel)
+            copy.clicked.connect(
+                lambda _=False, p=self._update_path:
+                    QGuiApplication.clipboard().setText(p))
+            self.update_actions.addWidget(copy)
+            note = ("Run it to install the update."
+                    if IS_WINDOWS else
+                    "Install it yourself: flatpak install --user "
+                    + self._update_path)
+            self.update_actions.addWidget(label(note, "caption",
+                                                self.update_panel))
+
+    def _start_update_download(self, result):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        if not self._ask(
+                "Download update",
+                "This downloads {} from GitHub into {}.\n\n"
+                "It will not be run or installed automatically — you do "
+                "that yourself once it has finished.\n\nProceed?".format(
+                    result["asset_name"], updater.downloads_dir())):
+            return
+        self.run_tool(lambda: self._download_update(result))
+
+    def _download_update(self, result):
+        dest = updater.downloads_dir()
+        self._log("updater", "=== Downloading {} ===\n"
+                  .format(result["asset_name"]), "command")
+        try:
+            path = deps.download_file(result["asset_url"], dest,
+                                      progress=self._download_progress)
+        except Exception as e:  # noqa: BLE001
+            self._log("updater", "Download failed: {}\n".format(e), "warn")
+            return
+        self._log("updater", "Saved to {}\n".format(path), "ok")
+        self.sig_update_downloaded.emit(path)
+
+    def _show_update_path(self, path):
+        self._update_path = path
+        self._rebuild_update_actions()
 
     def _install_dep(self, dep, plan):
         note = "\n\nNote: {}".format(plan["note"]) if plan.get("note") else ""

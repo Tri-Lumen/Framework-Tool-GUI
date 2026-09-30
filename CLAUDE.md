@@ -81,6 +81,10 @@ frameworkgui/
                         powercfg. Builds commands, does no I/O of its own.
   deps.py              Helper-tool registry: detect, and build install plans.
   drivers.py           Framework download-page catalog. Links only, no I/O.
+  updater.py           Version comparison + release-asset lookup for the
+                        Setup pane's "Check for updates". Downloads only —
+                        see its docstring — using deps.py's fetch/download
+                        functions for the one HTTP call it makes.
                         (everything except app.py and widgets.py follows
                         parsers.py's rules: stdlib only, no toolkit import,
                         I/O injected as arguments)
@@ -509,9 +513,21 @@ failure mode to watch for.
     Framework keeps one downloads list per device build that is always
     current, and the Knowledge Base 403s scripted fetches anyway. An earlier
     version scraped the bundle link out of the page; `test_drivers.py` has a
-    guard that fails if any networking creeps back into the module. The
-    app's only network access now lives in `deps.py` (fetching a helper's
-    GitHub release), which is why the Flatpak needs no `--share=network`.
+    guard that fails if any networking creeps back into the module.
+  - `updater.py` is the Setup pane's "Check for updates": compares
+    `frameworkgui.__version__` against this repo's latest GitHub release and,
+    if newer, offers the matching asset (`FrameworkGUI-Setup.exe` on Windows,
+    `FrameworkGUI.flatpak` on Linux) for download — through `deps.py`'s
+    `fetch_text`/`download_file`, the same functions the RyzenAdj download
+    already uses, so there is still exactly one place in the app that speaks
+    HTTP. It goes no further than a saved path and a Copy button: this app
+    has never executed a downloaded installer on the user's behalf (see
+    "Deliberately out of scope" below), and a self-updater doesn't get an
+    exception to that. Unlike `deps.py`'s Windows-only download path, the
+    check itself needs the network on *both* platforms — there is no portal
+    for "fetch this URL" the way there is for opening a link — so the
+    Flatpak manifest now carries `--share=network`, which it did not before
+    this existed.
 
 - **Blocked commands** (`App.BLOCKED` in `app.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
@@ -718,7 +734,10 @@ failure mode to watch for.
   into. Rehearse it before relying on a release. `tests/test_packaging.py`
   still only checks the manifest's *structure*, and the
   `flatpak-spawn --host` runtime behaviour remains unexercised regardless of
-  whether the build goes green.
+  whether the build goes green. It also now carries `--share=network` for
+  `updater.py`, which has never been exercised inside the sandbox either —
+  confirm "Check for updates" actually reaches GitHub from a built Flatpak,
+  not just from a source checkout.
 - **`windows/build.bat` now installs PySide6 and bundles `assets/`, and
   neither change has been through CI yet.** The exe will be far larger than
   the Tkinter one. If it fails to launch, the first thing to check is
@@ -764,9 +783,12 @@ failure mode to watch for.
   at it and the Drivers pane can link it, but nothing here can script it. On
   Intel, `powercfg` (Windows) and RAPL (Linux) are what the app can actually
   drive.
-- **Running downloaded installers.** The Drivers pane downloads a bundle and
-  stops there. Executing a vendor installer unattended, as an elevated
-  process, is not something this app should do on a user's behalf.
+- **Running downloaded installers.** Setup's helper-tool downloads
+  (`deps.py`) and the Setup pane's "Check for updates" (`updater.py`) both
+  stop at a saved file. Executing a vendor installer, or this app's own
+  updated installer, unattended and as an elevated process, is not
+  something this app should do on a user's behalf. Checking for an update
+  and downloading it are not the exception — only running one would be.
 
 ## Releasing
 
