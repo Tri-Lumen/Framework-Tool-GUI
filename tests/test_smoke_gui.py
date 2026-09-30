@@ -876,6 +876,18 @@ class TestLastReportPath(unittest.TestCase):
         self.assertIn("Last report: /tmp/framework_report_x.txt",
                       self.report_row_texts())
 
+    def test_clicking_copy_path_puts_it_on_the_clipboard_and_shows_a_toast(self):
+        window = self.window
+        window._show_report_path("/tmp/framework_report_x.txt")
+        row = window.report_row
+        button = next(row.itemAt(i).widget() for i in range(row.count())
+                     if row.itemAt(i).widget() is not None
+                     and row.itemAt(i).widget().text() == "Copy path")
+        button.click()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "/tmp/framework_report_x.txt")
+        self.assertFalse(window.toast.isHidden())
+
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestSettingsBackup(unittest.TestCase):
@@ -1786,3 +1798,96 @@ class TestUpdater(unittest.TestCase):
         self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
         self.window.sig_update_checked.emit(self.result(newer=True))
         self.assertIn("Download v9.9.9", self.action_texts())
+
+    def test_clicking_copy_path_puts_it_on_the_clipboard_and_shows_a_toast(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        button = next(b for b in
+                     self.window.update_panel.findChildren(fg.QPushButton)
+                     if b.text() == "Copy path")
+        button.click()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "/tmp/FrameworkGUI-Setup.exe")
+        self.assertFalse(self.window.toast.isHidden())
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestToast(unittest.TestCase):
+    """The brief "Copied to clipboard" confirmation shown after every
+    clipboard-copy action in the app - the drawer's "copy", "Copy summary",
+    the Diagnostics/updater "Copy path" buttons, and both Drivers pane
+    "Copy link" buttons all go through the same `_copy_with_toast` helper."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_show_toast_makes_it_visible_with_the_given_text(self):
+        self.window._show_toast("Copied to clipboard")
+        self.assertEqual(self.window.toast.text(), "Copied to clipboard")
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_it_hides_itself_after_the_timer_fires(self):
+        self.window._show_toast("Copied to clipboard")
+        self.window.toast._timer.timeout.emit()
+        self.assertTrue(self.window.toast.isHidden())
+
+    def test_copy_with_toast_sets_the_clipboard_and_shows_the_toast(self):
+        self.window._copy_with_toast("a value to copy")
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "a value to copy")
+        self.assertEqual(self.window.toast.text(), "Copied to clipboard")
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_copy_device_summary_shows_the_toast(self):
+        self.window._copy_device_summary()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_drawer_copy_shows_the_toast(self):
+        self.window.drawer.append("framework_tool", "hello\n")
+        self.window.drawer.select("framework_tool")
+        self.window.drawer._copy()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_driver_copy_link_shows_the_toast(self):
+        self.window._copy_selected_driver_link()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_reposition_centres_the_toast_over_the_parent_bottom_edge(self):
+        window = self.window
+        window.resize(900, 700)
+        window._show_toast("Copied to clipboard")
+        window.toast.reposition()
+        parent_rect = window.toast.parentWidget().rect()
+        expected_x = (parent_rect.width() - window.toast.width()) // 2
+        expected_y = parent_rect.height() - window.toast.height() - 24
+        self.assertEqual(window.toast.x(), expected_x)
+        self.assertEqual(window.toast.y(), expected_y)
+
+    def test_a_window_resize_repositions_a_visible_toast(self):
+        from unittest import mock
+
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+        window = self.window
+        window._show_toast("Copied to clipboard")
+        event = QResizeEvent(QSize(1200, 800), QSize(900, 700))
+        with mock.patch.object(window.toast, "reposition") as reposition:
+            window.resizeEvent(event)
+        reposition.assert_called_once()
+
+    def test_a_window_resize_leaves_a_hidden_toast_alone(self):
+        from unittest import mock
+
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+        window = self.window
+        event = QResizeEvent(QSize(1200, 800), QSize(900, 700))
+        with mock.patch.object(window.toast, "reposition") as reposition:
+            window.resizeEvent(event)
+        reposition.assert_not_called()

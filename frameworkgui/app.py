@@ -366,6 +366,10 @@ class Drawer(QWidget):
 
         self._tabs = {}
         self._views = {}
+        # Set by App after construction - a hook rather than a signal
+        # because there is exactly one listener and it wants no arguments
+        # beyond "this happened".
+        self.on_copy = None
         self.ensure("framework_tool")
 
     def ensure(self, stream):
@@ -407,6 +411,8 @@ class Drawer(QWidget):
         view = self.current_view()
         if view:
             QGuiApplication.clipboard().setText(view.view.toPlainText())
+            if self.on_copy:
+                self.on_copy("Copied to clipboard")
 
     def _current_stream(self):
         view = self.current_view()
@@ -708,6 +714,10 @@ class App(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # A floating overlay, not part of `root`'s layout - it positions
+        # itself against `central`'s current size each time it is shown.
+        self.toast = widgets.Toast(central)
+
         self.banner = self._build_banner(central)
         root.addWidget(self.banner)
         self.fallback_strip = self._build_fallback_strip(central)
@@ -751,6 +761,7 @@ class App(QMainWindow):
 
         self.drawer = Drawer(column)
         self.drawer.setFixedHeight(self.drawer_height)
+        self.drawer.on_copy = self._show_toast
         col.addWidget(self.drawer)
 
         col.addWidget(self._build_statusbar(column))
@@ -1021,6 +1032,8 @@ class App(QMainWindow):
         self.pane.setVisible(not collapsed)
         self.combo_wrap.setVisible(collapsed)
         self.section_combo.setVisible(collapsed)
+        if not self.toast.isHidden():
+            self.toast.reposition()
 
     def closeEvent(self, event):
         # Flipped before anything is torn down, so a daemon thread's next
@@ -1349,7 +1362,7 @@ class App(QMainWindow):
         return "\n".join(lines)
 
     def _copy_device_summary(self):
-        QGuiApplication.clipboard().setText(self._device_summary_text())
+        self._copy_with_toast(self._device_summary_text())
 
     def _save_chassis_image(self):
         path, _filter = QFileDialog.getSaveFileName(
@@ -1461,8 +1474,7 @@ class App(QMainWindow):
         copy_btn = QPushButton("Copy path", parent)
         copy_btn.setProperty("role", "compact")
         copy_btn.clicked.connect(
-            lambda _=False: QGuiApplication.clipboard().setText(
-                self._last_report_path))
+            lambda _=False: self._copy_with_toast(self._last_report_path))
         self.report_row.addWidget(copy_btn)
         self.report_row.addStretch(1)
 
@@ -2448,8 +2460,7 @@ class App(QMainWindow):
         this_copy = QPushButton("Copy link", panel)
         this_copy.setProperty("role", "compact")
         this_copy.clicked.connect(
-            lambda _=False, u=entry["url"]:
-                QGuiApplication.clipboard().setText(u))
+            lambda _=False, u=entry["url"]: self._copy_with_toast(u))
         this_row.addWidget(this_copy)
         explanation = label(
             "Opens Framework's downloads list for this build."
@@ -2511,7 +2522,7 @@ class App(QMainWindow):
     def _copy_selected_driver_link(self):
         url = self.driver_choice.currentData()
         if url:
-            QGuiApplication.clipboard().setText(url)
+            self._copy_with_toast(url)
             self.set_status("Copied link to clipboard.")
 
     def _open_url(self, url):
@@ -2668,8 +2679,7 @@ class App(QMainWindow):
             self.update_actions.addWidget(badge)
             copy = QPushButton("Copy path", self.update_panel)
             copy.clicked.connect(
-                lambda _=False, p=self._update_path:
-                    QGuiApplication.clipboard().setText(p))
+                lambda _=False, p=self._update_path: self._copy_with_toast(p))
             self.update_actions.addWidget(copy)
             note = ("Run it to install the update."
                     if IS_WINDOWS else
@@ -3711,6 +3721,18 @@ class App(QMainWindow):
 
     def _on_status(self, msg):
         self.status_message.setText(msg)
+
+    def _show_toast(self, text):
+        """A brief on-screen confirmation, for the copy actions that
+        otherwise gave no sign anything had happened beyond a status-bar
+        line easy to miss. Called from the UI thread only — every site
+        that uses it is a button's own click handler, never a worker.
+        """
+        self.toast.show_message(text)
+
+    def _copy_with_toast(self, text):
+        QGuiApplication.clipboard().setText(text)
+        self._show_toast("Copied to clipboard")
 
     def _progress(self, index, step, total, name, value, fraction):
         self._emit(self.sig_progress,

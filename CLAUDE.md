@@ -404,6 +404,22 @@ failure mode to watch for.
   URLs, for pasting into a chat or a ticket instead of opening a browser
   here.
 
+- **Every clipboard copy shows the same brief on-screen confirmation.** The
+  drawer's "copy", "Copy summary", both "Copy path" buttons (the Diagnostics
+  last-report row and the updater panel) and both Drivers "Copy link"
+  buttons used to rely on the status bar alone, which is easy to miss —
+  there is no other feedback that a click landed. `widgets.Toast` is a
+  self-dismissing badge-styled label; `App._copy_with_toast(text)` is the
+  one place that sets the clipboard and shows it, and every copy site above
+  calls it (`Drawer._copy` goes through its own `on_copy` hook instead,
+  since it has no `App` reference). Its hide timer is a UI animation tick
+  in the same idiom as `Spinner`'s and `TimedBar`'s, not a background
+  process: nothing ticks while no toast is showing. It is a floating child
+  of the central widget rather than something in a layout, so
+  `App.resizeEvent` calls `toast.reposition()` whenever the window is
+  resized while one is showing — otherwise a toast shown just before a
+  resize would stay centred over where the window used to be.
+
 - **DP/HDMI and Audio cards are identified but not located.** Upstream says
   so outright: the HID API it goes through abstracts away the USB topology,
   "so we can't figure out which port the card is connected to". They are

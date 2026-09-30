@@ -1057,3 +1057,44 @@ class ImageSlot(QFrame):
         y = (self.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
         painter.end()
+
+
+class Toast(QLabel):
+    """A brief, self-dismissing confirmation — "Copied to clipboard" and
+    the like, for the handful of actions (a clipboard copy, mainly) that
+    otherwise gave no sign anything had happened beyond a status-bar line
+    easy to miss in the corner of the eye.
+
+    The auto-hide timer is the same kind of thing `Spinner`'s and
+    `TimedBar`'s already are, not a background process: it only exists
+    between `show_message()` and the next time it fires, and nothing ticks
+    while no toast is showing. It floats over its parent rather than sitting
+    in a layout, so it re-centres itself on its parent's bottom edge both
+    when shown and whenever the parent is resized while it is visible —
+    `reposition()` is exposed for the parent's own `resizeEvent` to call.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setProperty("role", "badge")
+        self.setProperty("badge", "accent")
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignCenter)
+        self.hide()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def reposition(self):
+        if self.parentWidget() is not None:
+            parent_rect = self.parentWidget().rect()
+            self.move((parent_rect.width() - self.width()) // 2,
+                     parent_rect.height() - self.height() - 24)
+
+    def show_message(self, text, duration_ms=2200):
+        self.setText(text)
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+        self._timer.start(duration_ms)
