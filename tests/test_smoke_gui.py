@@ -791,6 +791,72 @@ class TestRailButtonHover(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDriversCopyLink(unittest.TestCase):
+    """The Drivers pane's "Copy link" buttons - the same URLs "Open"
+    already reaches, for someone who wants to paste the link elsewhere
+    (a chat, a ticket) rather than have it opened here."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_both_copy_link_buttons_are_present(self):
+        buttons = buttons_in(self.window.pages["drivers"])
+        self.assertEqual(buttons.count("Copy link"), 2)
+
+    def test_copying_the_selected_build_puts_its_url_on_the_clipboard(self):
+        window = self.window
+        url = window.driver_choice.currentData()
+        self.assertTrue(url)
+        window._copy_selected_driver_link()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(), url)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestLastReportPath(unittest.TestCase):
+    """The Diagnostics pane remembers where the last "Full system report"
+    landed, so a second look does not mean re-running the whole report to
+    find the path again - and that state survives _build_pages() rebuilding
+    the page after every rescan, the same way the updater panel's state
+    does."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def report_row_texts(self):
+        row = self.window.report_row
+        return [row.itemAt(i).widget().text() for i in range(row.count())
+               if row.itemAt(i).widget() is not None]
+
+    def test_nothing_shown_before_a_report_has_been_saved(self):
+        self.assertEqual(self.report_row_texts(), [])
+
+    def test_a_saved_report_shows_its_path_and_a_copy_button(self):
+        self.window._show_report_path("/tmp/framework_report_x.txt")
+        texts = self.report_row_texts()
+        self.assertIn("Last report: /tmp/framework_report_x.txt", texts)
+        self.assertIn("Copy path", texts)
+
+    def test_the_path_survives_a_page_rebuild(self):
+        window = self.window
+        window._show_report_path("/tmp/framework_report_x.txt")
+        window._build_pages()
+        self.assertIn("Last report: /tmp/framework_report_x.txt",
+                      self.report_row_texts())
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestSettingsBackup(unittest.TestCase):
     """Export/Import on the Settings pane - a local backup of the field
     values, never a read of or write to the device by itself."""

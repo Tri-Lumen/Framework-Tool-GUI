@@ -373,6 +373,20 @@ failure mode to watch for.
   command in the app echoes its output now; `_read_into` is the one place
   that does it for the scan.
 
+- **The Diagnostics pane remembers where the last full system report
+  landed.** `tool_full_report` used to only log the saved path into the
+  drawer, so finding it again after switching sections meant re-reading a
+  scrollback or re-running the whole report. `sig_report_saved` carries the
+  path to `App._last_report_path`, shown as a badge + Copy-path button
+  above the tool grid (`_refresh_report_row`) — state that, like the
+  updater panel's, has to be explicitly restored after `_build_pages()`
+  rebuilds the page on every rescan.
+
+- **The Drivers pane's links can be copied, not just opened.** "Copy link"
+  sits next to both "This system" and "Open downloads list" — the same
+  URLs, for pasting into a chat or a ticket instead of opening a browser
+  here.
+
 - **DP/HDMI and Audio cards are identified but not located.** Upstream says
   so outright: the HID API it goes through abstracts away the USB topology,
   "so we can't figure out which port the card is connected to". They are

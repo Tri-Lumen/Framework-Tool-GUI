@@ -601,6 +601,7 @@ class App(QMainWindow):
     sig_fill = Signal(str, str)
     sig_update_checked = Signal(object)
     sig_update_downloaded = Signal(str)
+    sig_report_saved = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -638,6 +639,7 @@ class App(QMainWindow):
         # separate from navigation.RECENT_SUGGESTIONS, which are curated
         # defaults rather than what this user actually ran.
         self._custom_history = []
+        self._last_report_path = None
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -679,7 +681,8 @@ class App(QMainWindow):
                 (self.sig_readings, self._apply_readings),
                 (self.sig_fill, self._on_fill),
                 (self.sig_update_checked, self._apply_update_check),
-                (self.sig_update_downloaded, self._show_update_path)):
+                (self.sig_update_downloaded, self._show_update_path),
+                (self.sig_report_saved, self._show_report_path)):
             signal.connect(slot)
 
         if IS_LINUX and not is_root() and not self.use_pkexec:
@@ -1324,6 +1327,10 @@ class App(QMainWindow):
             box, parent, "Diagnostics",
             note="Multi-step tools issue many commands — run elevated to "
                  "avoid repeated prompts.")
+        self.report_row = QHBoxLayout()
+        self.report_row.setSpacing(theme.SPACE[3])
+        box.addLayout(self.report_row)
+        self._refresh_report_row(parent)
         grid = QGridLayout()
         grid.setHorizontalSpacing(theme.SPACE[7])
         grid.setVerticalSpacing(theme.SPACE[3])
@@ -1373,6 +1380,29 @@ class App(QMainWindow):
         self.tool_detail = ToolDetail(self._request_cancel, parent)
         self.tool_detail.setVisible(False)
         box.addWidget(self.tool_detail)
+
+    def _refresh_report_row(self, parent):
+        while self.report_row.count():
+            item = self.report_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self._last_report_path:
+            return
+        self.report_row.addWidget(widgets.Badge(
+            "Last report: " + self._last_report_path, "ok", parent,
+            elide=theme.BADGE_PATH_WIDTH))
+        copy_btn = QPushButton("Copy path", parent)
+        copy_btn.setProperty("role", "compact")
+        copy_btn.clicked.connect(
+            lambda _=False: QGuiApplication.clipboard().setText(
+                self._last_report_path))
+        self.report_row.addWidget(copy_btn)
+        self.report_row.addStretch(1)
+
+    def _show_report_path(self, path):
+        self._last_report_path = path
+        if hasattr(self, "report_row"):
+            self._refresh_report_row(self.pages.get("tools"))
 
     def _tool_param_editor(self, tool, spec, parent):
         """A compact spin box for one overridable tool parameter.
@@ -2319,6 +2349,12 @@ class App(QMainWindow):
         this_button.clicked.connect(
             lambda _=False, u=entry["url"]: self._open_url(u))
         this_row.addWidget(this_button)
+        this_copy = QPushButton("Copy link", panel)
+        this_copy.setProperty("role", "compact")
+        this_copy.clicked.connect(
+            lambda _=False, u=entry["url"]:
+                QGuiApplication.clipboard().setText(u))
+        this_row.addWidget(this_copy)
         explanation = label(
             "Opens Framework's downloads list for this build."
             if entry["exact"] else
@@ -2344,6 +2380,10 @@ class App(QMainWindow):
         open_button = QPushButton("Open downloads list", panel)
         open_button.clicked.connect(self._open_selected_driver_page)
         every_row.addWidget(open_button)
+        copy_every = QPushButton("Copy link", panel)
+        copy_every.setProperty("role", "compact")
+        copy_every.clicked.connect(self._copy_selected_driver_link)
+        every_row.addWidget(copy_every)
         every_row.addStretch(1)
         panel.body.addLayout(every_row)
         panel.body.addWidget(rule(panel))
@@ -2371,6 +2411,12 @@ class App(QMainWindow):
         if url:
             webbrowser.open(url)
             self.set_status("Opened {}".format(url))
+
+    def _copy_selected_driver_link(self):
+        url = self.driver_choice.currentData()
+        if url:
+            QGuiApplication.clipboard().setText(url)
+            self.set_status("Copied link to clipboard.")
 
     def _open_url(self, url):
         webbrowser.open(url)
@@ -3831,6 +3877,7 @@ class App(QMainWindow):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.writelines(lines)
             self._append("\nSaved: {}\n".format(path))
+            self._emit(self.sig_report_saved, path)
         except OSError as e:
             self._append("\nCould not write file: {}\n".format(e))
 
