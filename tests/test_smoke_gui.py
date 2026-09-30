@@ -153,6 +153,7 @@ def _drive_app(timeout_ms):
         results["title"] = window.windowTitle()
         results["tool_version"] = window.tool_version
         results["firmware"] = dict(window.firmware)
+        results["scanned_label"] = window.scanned_label.text()
         for section, page in window.pages.items():
             results["buttons:" + section] = buttons_in(page)
             results["labels:" + section] = labels_in(page)
@@ -285,6 +286,14 @@ class TestGuiSmoke(unittest.TestCase):
     def test_overview_reads_the_firmware_versions(self):
         r = run_app_and_capture(VERSIONS_L12)
         self.assertEqual(r["firmware"]["ec"], "hx20 0.0.9")
+
+    def test_overview_shows_when_it_was_last_scanned(self):
+        # There is no background refresh - "Rescan device" is the only way
+        # the readings change - so without this a five-minute-old reading
+        # looks identical to a fresh one.
+        r = run_app_and_capture(VERSIONS_L12)
+        self.assertRegex(r["scanned_label"],
+                         r"^Last scanned \d{2}:\d{2}:\d{2}$")
 
     def test_status_bar_learns_the_tool_version(self):
         r = run_app_and_capture(VERSIONS_L16)
@@ -649,3 +658,95 @@ class TestManufacturerTdpRange(unittest.TestCase):
         from frameworkgui import power
         self.assertRaises(power.PowerError,
                           self.window._check_manufacturer_range, "5")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPersistedSection(unittest.TestCase):
+    """Relaunching the app returns to the section it was last showing,
+    rather than always landing back on Overview. Neither test lets the
+    launch scan's QTimer fire (no app.exec(), no settle()), so there is no
+    worker thread to race with teardown."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def tearDown(self):
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_a_stored_section_is_restored_on_launch(self):
+        state = dict(fg.appstate.DEFAULTS)
+        state["last_section"] = "settings"
+        fg.appstate.save(state)
+        window = fg.App()
+        try:
+            self.assertEqual(window.section, "settings")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_selecting_a_section_persists_it(self):
+        window = fg.App()
+        try:
+            window._select_section("power")
+            self.assertEqual(fg.appstate.load()["last_section"], "power")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestKeyboardShortcuts(unittest.TestCase):
+    """F5 and Ctrl+N mirror the Rescan button and the rail, for anyone
+    driving the app from the keyboard rather than the mouse."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window._busy = False
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def _shortcut(self, sequence):
+        target = fg.QKeySequence(sequence)
+        return next(s for s in self.window.findChildren(fg.QShortcut)
+                   if s.key() == target)
+
+    def test_f5_triggers_a_rescan(self):
+        # Marking it busy first stops _rescan from actually spawning the
+        # detect thread - this only has to prove the shortcut reaches
+        # _rescan, the same guard TestBusyGuard exercises another way.
+        self.window._busy = True
+        self._shortcut("F5").activated.emit()
+        self.assertEqual(self.window.status_message.text(),
+                         "Busy — wait or cancel the running tool.")
+
+    def test_ctrl_number_keys_select_each_rail_group(self):
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
+            self._shortcut("Ctrl+{}".format(index)).activated.emit()
+            self.assertEqual(self.window.rail_key, group["key"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDrawerCopy(unittest.TestCase):
+    """The drawer's "copy" button, alongside its existing wrap/clear."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_copy_puts_the_current_tabs_text_on_the_clipboard(self):
+        self.window.drawer.append("framework_tool", "hello from a test\n")
+        self.window.drawer.select("framework_tool")
+        self.window.drawer._copy()
+        self.assertIn("hello from a test",
+                      fg.QGuiApplication.clipboard().text())

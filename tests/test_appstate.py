@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from frameworkgui import appstate, theme  # noqa: E402
+from frameworkgui import appstate, navigation, theme  # noqa: E402
 
 
 def reader(text):
@@ -109,13 +109,27 @@ class TestNormalise(unittest.TestCase):
         self.assertEqual(appstate.normalise({"drawer_height": 5000})[
             "drawer_height"], theme.DRAWER_MAX)
 
+    def test_unknown_section_is_ignored(self):
+        state = appstate.normalise({"last_section": "not-a-real-section"})
+        self.assertEqual(state["last_section"],
+                         appstate.DEFAULTS["last_section"])
+
+    def test_known_section_is_kept(self):
+        state = appstate.normalise({"last_section": "settings"})
+        self.assertEqual(state["last_section"], "settings")
+
+    def test_default_section_is_a_real_one(self):
+        self.assertIn(appstate.DEFAULTS["last_section"], navigation.SECTIONS)
+
 
 class TestLoad(unittest.TestCase):
 
     def test_reads_a_good_file(self):
         text = json.dumps({"appearance": "opaque", "drawer_height": 320})
         state = appstate.load("/nowhere", opener=reader(text))
-        self.assertEqual(state, {"appearance": "opaque", "drawer_height": 320})
+        self.assertEqual(state, {"appearance": "opaque", "drawer_height": 320,
+                                 "last_section": appstate.DEFAULTS[
+                                     "last_section"]})
 
     def test_missing_file_gives_defaults(self):
         state = appstate.load("/nowhere",
@@ -145,7 +159,8 @@ class TestSave(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(json.loads(writer.text),
                          {"appearance": "opaque",
-                          "drawer_height": theme.DRAWER_MAX})
+                          "drawer_height": theme.DRAWER_MAX,
+                          "last_section": appstate.DEFAULTS["last_section"]})
         self.assertEqual(made, ["/nowhere"])
 
     def test_a_failed_write_is_reported_not_raised(self):
@@ -162,13 +177,15 @@ class TestSave(unittest.TestCase):
 
     def test_round_trip(self):
         writer = Writer()
-        appstate.save({"appearance": "opaque", "drawer_height": 300},
+        appstate.save({"appearance": "opaque", "drawer_height": 300,
+                       "last_section": "power"},
                       "/nowhere/settings.json", opener=writer,
                       makedirs=lambda _d: None)
         self.assertEqual(
             appstate.load("/nowhere/settings.json",
                           opener=reader(writer.text)),
-            {"appearance": "opaque", "drawer_height": 300})
+            {"appearance": "opaque", "drawer_height": 300,
+             "last_section": "power"})
 
 
 if __name__ == "__main__":

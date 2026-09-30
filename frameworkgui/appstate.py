@@ -1,11 +1,13 @@
 """
 The handful of UI choices that survive a relaunch.
 
-Two things persist, both from the design's State table: which appearance the
-user picked (`acrylic` or `opaque`) and how tall they dragged the output
-drawer. Nothing about the hardware is cached here — every reading in the app
-comes from running a command, and a stale cached one would be worse than a
-blank field.
+Three things persist: which appearance the user picked (`acrylic` or
+`opaque`), both from the design's State table; how tall they dragged the
+output drawer; and which section they last had open, so relaunching the app
+returns to where they left off instead of always landing on Overview.
+Nothing about the hardware is cached here — every reading in the app comes
+from running a command, and a stale cached one would be worse than a blank
+field.
 
 Stdlib only, no toolkit import, and every read and write goes through an
 injectable callable so the whole module is testable without touching a real
@@ -18,11 +20,12 @@ a drawer height.
 import json
 import os
 
-from . import theme
+from . import navigation, theme
 
 DEFAULTS = {
     "appearance": theme.ACRYLIC,
     "drawer_height": theme.DRAWER_DEFAULT,
+    "last_section": navigation.SECTIONS[0],
 }
 
 FILENAME = "settings.json"
@@ -73,6 +76,9 @@ def normalise(raw):
         state["appearance"] = appearance
     if "drawer_height" in raw:
         state["drawer_height"] = clamp_drawer(raw["drawer_height"])
+    section = raw.get("last_section")
+    if section in navigation.SECTIONS:
+        state["last_section"] = section
     return state
 
 

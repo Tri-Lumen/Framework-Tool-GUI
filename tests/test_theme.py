@@ -86,6 +86,15 @@ class TestStylesheet(unittest.TestCase):
                          "QFrame#dangerNotice"):
             self.assertIn(selector, sheet)
 
+    def test_keyboard_focus_is_visible(self):
+        # A style sheet suppresses Qt's own focus rectangle, so a button or
+        # field reached by Tab (or the F5/Ctrl+N shortcuts) needs its own
+        # indication that it is the one that will fire on Enter.
+        sheet = theme.stylesheet(theme.OPAQUE)
+        self.assertIn("QPushButton:focus", sheet)
+        self.assertIn("QPushButton:pressed", sheet)
+        self.assertIn("QLineEdit:focus", sheet)
+
 
 class TestParseColour(unittest.TestCase):
 

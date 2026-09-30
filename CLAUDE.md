@@ -62,7 +62,8 @@ frameworkgui/
                         every gated pane (12 tools, 9 port queries, 9 settings
                         rows, 2 charge presets). Keys, not bound methods, so
                         it stays testable.
-  appstate.py          The two persisted UI choices (appearance, drawer height).
+  appstate.py          The three persisted UI choices (appearance, drawer
+                        height, last-viewed section).
   backdrop.py          Compositing probe + the Windows 11 backdrop call.
   device_images.py     Board string → product photograph, and the chassis
                         dimensions/bay count the Overview drawing is scaled
@@ -252,7 +253,45 @@ failure mode to watch for.
   `framework_tool`, `ryzenadj`, `apt-get` — with its output after it. Lines
   are inserted with a character format rather than as HTML so the CLI's text
   is never reformatted, which the design is explicit about. Height is
-  dragged with the grabber, clamped to 70–460px, and persisted.
+  dragged with the grabber, clamped to 70–460px, and persisted. A "copy"
+  button sits beside wrap/clear so a tab's raw output can be pasted into a
+  bug report without a mouse-drag selection across a scrolled terminal.
+
+- **There is no background refresh, so the app says when it last looked.**
+  The six-card grid and the bay panel only change on "Rescan device" (or the
+  launch scan) — never on a timer, per the no-background-processes rule — so
+  a five-minute-old reading looks identical to a fresh one with nothing to
+  tell them apart. `App._last_scan_at` is stamped right before `_build_pages()`
+  in `_apply_detection` and shown as a caption under the sub-line
+  (`App._scanned_text`). It is a static timestamp, not a ticking "n minutes
+  ago" — that would need its own timer, which is the one thing this project
+  has never allowed itself.
+
+- **The last section you were on is where you land next time.** The rail
+  used to always open on Overview, which is a longer path back to whatever
+  pane you actually spend your time in — Settings, Fans, the console. Every
+  section always exists in `self.pages` regardless of the detected model
+  (`tests/test_smoke_gui.TestGuiSmoke.test_every_section_is_built`), so a
+  stored section needs no gating-aware fallback: `appstate.py` validates it
+  against `navigation.SECTIONS` and `App._select_section` persists it on
+  every click, the same eager-write pattern the drawer-height drag already
+  used.
+
+- **F5 and Ctrl+1..Ctrl+9 are the keyboard equivalents of the Rescan button
+  and the rail**, wired in `App._build_shortcuts` and generated off
+  `navigation.RAIL_GROUPS` rather than hard-coded, so a sixth group would not
+  silently go unreachable from the keyboard. There is no menu bar to hang
+  them off, so the rail buttons' tooltips are the only place these are
+  written down — check there before adding another one.
+
+- **A style sheet suppresses Qt's own focus rectangle.** Once `theme.py`'s
+  sheet is in force, tabbing to a button or field (or landing on one via a
+  shortcut) drew no visible indication it was the one Enter would activate.
+  `QPushButton:focus`/`QLineEdit:focus`/`QComboBox:focus`/`QSpinBox:focus`
+  put a thin accent-coloured `outline` back — `outline`, not `border`, so
+  focusing a button never shifts its neighbours — and `QPushButton:pressed`
+  gets the same accent-rail fill the selected rail button uses, so pressing
+  one reads as an action rather than nothing happening until it releases.
 
 - **Overview readings cost three more elevated commands.** `--versions` is
   the launch scan, as it always was. The six stat cards and the bay panel

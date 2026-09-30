@@ -384,6 +384,13 @@ QPushButton {
 }
 QPushButton:hover { border-color: %(text.faint)s; }
 QPushButton:disabled { color: %(text.faint)s; border-color: %(border)s; }
+QPushButton:pressed { background: %(accent.rail)s; }
+/* Qt draws no focus indication of its own once a style sheet is in force,
+   so a button reached by Tab or by the F5/Ctrl+N shortcuts otherwise gives
+   no sign it is the one that will fire on Enter. `outline` rather than
+   `border`: it does not shift the button's box or its neighbours' layout
+   the way changing `border` on focus would. */
+QPushButton:focus { outline: 1px solid %(accent)s; outline-offset: 1px; }
 QPushButton[role="accent"] {
     background: %(accent.fill)s;
     border: 1px solid %(accent)s;
@@ -469,6 +476,9 @@ QLineEdit, QComboBox, QSpinBox {
     color: %(text.primary)s;
     padding: 5px 9px;
     selection-background-color: %(accent)s;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border-color: %(accent)s;
 }
 QLineEdit[role="mono"], QComboBox[role="mono"] {
     font-family: '%(font.mono)s', %(font.fallback.mono)s;

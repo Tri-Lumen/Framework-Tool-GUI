@@ -53,7 +53,14 @@ import time
 import webbrowser
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import (
+    QFontDatabase,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -329,12 +336,17 @@ class Drawer(QWidget):
         self.tab_row.setSpacing(0)
         self.tab_row.addStretch(1)
 
+        self.copy_btn = QPushButton("copy", tabs)
+        self.copy_btn.setProperty("role", "drawerTool")
+        self.copy_btn.setToolTip("Copy this tab's output to the clipboard")
+        self.copy_btn.clicked.connect(self._copy)
         self.wrap_btn = QPushButton("wrap", tabs)
         self.wrap_btn.setProperty("role", "drawerTool")
         self.wrap_btn.clicked.connect(self._toggle_wrap)
         self.clear_btn = QPushButton("clear", tabs)
         self.clear_btn.setProperty("role", "drawerTool")
         self.clear_btn.clicked.connect(self._clear)
+        self.tab_row.addWidget(self.copy_btn)
         self.tab_row.addWidget(self.wrap_btn)
         self.tab_row.addWidget(self.clear_btn)
         box.addWidget(tabs)
@@ -380,6 +392,11 @@ class Drawer(QWidget):
         view = self.current_view()
         if view:
             view.set_wrap(not view.wraps())
+
+    def _copy(self):
+        view = self.current_view()
+        if view:
+            QGuiApplication.clipboard().setText(view.view.toPlainText())
 
     def _clear(self):
         view = self.current_view()
@@ -579,6 +596,7 @@ class App(QMainWindow):
         self.firmware = {"ec": "", "bios": ""}
         self.tool_version = ""
         self.readings = {}
+        self._last_scan_at = None
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -595,7 +613,7 @@ class App(QMainWindow):
             self.appearance = theme.OPAQUE
         self.banner_dismissed = False
 
-        self.section = "overview"
+        self.section = self.settings["last_section"]
         self.rail_key = "overview"
         self.pages = {}
         self.tool_rows = {}
@@ -606,6 +624,7 @@ class App(QMainWindow):
         self.setMinimumSize(QSize(*theme.MIN_WINDOW_SIZE))
         self.resize(QSize(*theme.WINDOW_SIZE))
         self._build_chrome()
+        self._build_shortcuts()
         self._build_pages()
         self._apply_appearance()
         self._select_section(self.section)
@@ -685,6 +704,22 @@ class App(QMainWindow):
         col.addWidget(self._build_statusbar(column))
         body.addWidget(column, 1)
 
+    def _build_shortcuts(self):
+        """A handful of window-wide shortcuts for the actions used most.
+
+        F5 mirrors the "Rescan device" button; Ctrl+1..Ctrl+9 mirror the
+        rail, generated from navigation.RAIL_GROUPS rather than hard-coded
+        so a sixth group would not silently go unreachable from the
+        keyboard. Bound to the window itself (not a menu action), which is
+        why the rail buttons' tooltips are what tell you these exist.
+        """
+        QShortcut(QKeySequence("F5"), self, activated=self._rescan)
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
+            if index > 9:
+                break
+            QShortcut(QKeySequence("Ctrl+{}".format(index)), self,
+                     activated=lambda key=group["key"]: self._select_rail(key))
+
     def _build_banner(self, parent):
         bar = QWidget(parent)
         bar.setObjectName("banner")
@@ -737,10 +772,13 @@ class App(QMainWindow):
         box.setSpacing(theme.SPACE[1])
         box.setAlignment(Qt.AlignHCenter)
         self.rail_buttons = {}
-        for group in navigation.RAIL_GROUPS:
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
             button = widgets.RailButton(group, rail)
             button.clicked.connect(
                 lambda _=False, key=group["key"]: self._select_rail(key))
+            if index <= 9:
+                button.setToolTip(
+                    "{} (Ctrl+{})".format(group["label"], index))
             box.addWidget(button, 0, Qt.AlignHCenter)
             self.rail_buttons[group["key"]] = button
         box.addStretch(1)
@@ -922,6 +960,8 @@ class App(QMainWindow):
         if section not in self.pages:
             section = navigation.SECTIONS[0]
         self.section = section
+        self.settings["last_section"] = section
+        appstate.save(self.settings)
         group = navigation.group_for_section(section)
         self.rail_key = group["key"]
         for key, button in self.rail_buttons.items():
@@ -1046,6 +1086,8 @@ class App(QMainWindow):
         # The sub-line is trimmed to fit; the untrimmed strings live here.
         self.device_sub.setToolTip(self._device_detail())
         right.addWidget(self.device_sub)
+        self.scanned_label = label(self._scanned_text(), "caption", parent)
+        right.addWidget(self.scanned_label)
         right.addSpacing(theme.SPACE[4])
 
         grid = QGridLayout()
@@ -1147,6 +1189,16 @@ class App(QMainWindow):
                 parts.append("{} {}".format(
                     name, short_firmware(self.firmware[key])))
         return " · ".join(parts) or "No firmware detail read yet."
+
+    def _scanned_text(self):
+        """When `--versions` last answered, for the caption under the
+        sub-line. The app never re-reads the device on its own — there is no
+        background timer, only "Rescan device" — so without this a reading
+        from ten minutes ago looks exactly like one from just now.
+        """
+        if self._last_scan_at is None:
+            return "Not yet scanned this session"
+        return "Last scanned " + self._last_scan_at.strftime("%H:%M:%S")
 
     def _device_detail(self):
         """Everything the sub-line trimmed, for its tooltip."""
@@ -2389,6 +2441,7 @@ class App(QMainWindow):
         else:
             self.set_status(
                 "Could not identify the device model — showing all controls.")
+        self._last_scan_at = datetime.datetime.now()
         self._build_pages()
         self._refresh_statusbar()
         # Sensor readings need three more commands. Running them
