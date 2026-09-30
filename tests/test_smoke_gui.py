@@ -595,6 +595,27 @@ class TestChassisFollowsTheModel(unittest.TestCase):
                            "the Laptop 16 is not drawn wider than the 12")
         self.assertGreater(h16, h12)
 
+    def test_a_laptop_16_gets_six_bay_rows_not_four(self):
+        # module_rows used to be a hardcoded range(4), so two of the
+        # Laptop 16's six bays never got a row - or a state on the
+        # diagram, which reads whatever states _fill_bays happened to
+        # build from that same loop.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            make_stub_binary(tmpdir, VERSIONS_L16)
+            old = os.environ.get("PATH", "")
+            os.environ["PATH"] = tmpdir + os.pathsep + old
+            try:
+                app = QApplication.instance() or QApplication([])
+                window = fg.App()
+                settle(app, window)
+                count = len(window.module_rows)
+                window.close()
+                window.deleteLater()
+                app.processEvents()
+            finally:
+                os.environ["PATH"] = old
+        self.assertEqual(count, 6)
+
 
 # Named exactly as a real Laptop 13 AMD reported them (--pdports-chromebook),
 # in the order that machine's EC happened to print them — not the same order

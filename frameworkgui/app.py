@@ -1218,17 +1218,24 @@ class App(QMainWindow):
 
         bays = QHBoxLayout()
         bays.setSpacing(theme.SPACE[6])
+        overview_chassis = device_images.chassis_for(self.caps.get("model", ""))
         self.chassis = widgets.ChassisDiagram(panel)
         # Shape it from the detected model now, not only when readings
         # arrive: the sensor read needs elevation and may never happen, and
         # until it did a Laptop 16 was drawn with the default chassis.
-        self.chassis.set_chassis(
-            device_images.chassis_for(self.caps.get("model", "")))
+        self.chassis.set_chassis(overview_chassis)
         bays.addWidget(self.chassis, 0, Qt.AlignTop)
         module_grid = QGridLayout()
         module_grid.setSpacing(theme.SPACE[3])
         self.module_rows = []
-        for index in range(4):
+        # One row per bay the detected chassis actually has - this used to
+        # be a hardcoded range(4), which on a Laptop 16 (6 bays) silently
+        # dropped two bays from both this list and the diagram's own state
+        # colouring (states is built from the same loop, one entry per
+        # row), so two real bays always drew as empty regardless of what
+        # they actually reported.
+        bay_count = overview_chassis.get("bays", 4)
+        for index in range(bay_count):
             row_frame = QFrame(panel)
             row_frame.setObjectName("inset")
             row = QHBoxLayout(row_frame)
@@ -1243,11 +1250,15 @@ class App(QMainWindow):
             text.addWidget(name)
             text.addWidget(detail)
             row.addLayout(text, 1)
-            # Column = side (0 left, 1 right), row = position (0 back, 1
-            # front) — `_fill_bays` reorders `ports` into that same
-            # [LeftBack, LeftFront, RightBack, RightFront] sequence before
-            # this grid is painted, so a bay's row and the chassis
-            # diagram's marker for it land in the same physical spot.
+            # Two columns, as many rows as the bay count needs. On a 4-bay
+            # "sides" chassis this is column = side (0 left, 1 right), row
+            # = position (0 back, 1 front) — `_fill_bays` reorders `ports`
+            # into that same [LeftBack, LeftFront, RightBack, RightFront]
+            # sequence before this grid is painted, so a bay's row and the
+            # chassis diagram's marker for it land in the same physical
+            # spot. A 6-bay chassis has no such hardware-verified mapping
+            # (see `_ordered_by_bay`'s docstring) and is left in CLI order,
+            # same as the diagram's own fallback for it.
             module_grid.addWidget(row_frame, index % 2, index // 2)
             self.module_rows.append((icon, name, detail))
         bays.addLayout(module_grid, 1)
