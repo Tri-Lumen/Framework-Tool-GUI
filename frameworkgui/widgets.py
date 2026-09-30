@@ -426,13 +426,20 @@ class RailButton(QAbstractButton):
         self._icon = group["icon"]
         self._cache = {}
 
-    def _pixmap(self, active):
-        token = "accent.icon" if active else "icon"
+    def _pixmap(self, token):
         if token not in self._cache:
             ratio = self.devicePixelRatioF() or 1.0
             self._cache[token] = stroke_pixmap(self._icon, colour(token),
                                                18, ratio)
         return self._cache[token]
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -442,7 +449,18 @@ class RailButton(QAbstractButton):
             painter.fillRect(self.rect(), qcolour("accent.rail"))
             painter.fillRect(0, 0, 2, self.height(),
                              qcolour("accent.bright"))
-        pixmap = self._pixmap(active)
+        # Unselected but hovered gets a brighter icon than idle - the only
+        # feedback a mouse gets on this control otherwise is the cursor,
+        # since there is no border or fill to change the way a QPushButton
+        # has. Distinct from the active tint rather than a step toward it,
+        # so hovering never reads as "about to select".
+        if active:
+            token = "accent.icon"
+        elif self.underMouse():
+            token = "text.secondary"
+        else:
+            token = "icon"
+        pixmap = self._pixmap(token)
         x = (self.width() - 18) // 2
         y = (self.height() - 18) // 2
         painter.drawPixmap(x, y, pixmap)

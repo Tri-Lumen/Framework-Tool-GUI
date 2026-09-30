@@ -65,6 +65,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -342,6 +343,10 @@ class Drawer(QWidget):
         self.copy_btn.setProperty("role", "drawerTool")
         self.copy_btn.setToolTip("Copy this tab's output to the clipboard")
         self.copy_btn.clicked.connect(self._copy)
+        self.save_btn = QPushButton("save", tabs)
+        self.save_btn.setProperty("role", "drawerTool")
+        self.save_btn.setToolTip("Save this tab's output to a file")
+        self.save_btn.clicked.connect(self._save)
         self.wrap_btn = QPushButton("wrap", tabs)
         self.wrap_btn.setProperty("role", "drawerTool")
         self.wrap_btn.clicked.connect(self._toggle_wrap)
@@ -349,6 +354,7 @@ class Drawer(QWidget):
         self.clear_btn.setProperty("role", "drawerTool")
         self.clear_btn.clicked.connect(self._clear)
         self.tab_row.addWidget(self.copy_btn)
+        self.tab_row.addWidget(self.save_btn)
         self.tab_row.addWidget(self.wrap_btn)
         self.tab_row.addWidget(self.clear_btn)
         box.addWidget(tabs)
@@ -399,6 +405,26 @@ class Drawer(QWidget):
         view = self.current_view()
         if view:
             QGuiApplication.clipboard().setText(view.view.toPlainText())
+
+    def _current_stream(self):
+        view = self.current_view()
+        return next((s for s, v in self._views.items() if v is view), None)
+
+    def _save(self):
+        view = self.current_view()
+        if view is None:
+            return
+        stream = self._current_stream() or "output"
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save {} output".format(stream),
+            "{}.txt".format(stream), "Text files (*.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(view.view.toPlainText())
+        except OSError as e:
+            QMessageBox.warning(self, "Could not save", str(e))
 
     def _clear(self):
         view = self.current_view()
@@ -1101,6 +1127,13 @@ class App(QMainWindow):
             "ok" if self.caps.get("detected") else "muted", parent)
         title_row.addWidget(self.detected_badge)
         title_row.addStretch(1)
+        summary = QPushButton("Copy summary", parent)
+        summary.setProperty("role", "compact")
+        summary.setToolTip(
+            "Copy board/CPU/firmware and the current readings, for a bug "
+            "report")
+        summary.clicked.connect(self._copy_device_summary)
+        title_row.addWidget(summary)
         rescan = QPushButton("Rescan device", parent)
         rescan.clicked.connect(self._rescan)
         title_row.addWidget(rescan)
@@ -1234,6 +1267,20 @@ class App(QMainWindow):
                 ("framework_tool", self.tool_version)]
         return "\n".join("{}: {}".format(name, value)
                          for name, value in rows if value)
+
+    def _device_summary_text(self):
+        """Everything _device_detail knows, plus the six stat cards - the
+        paste someone reporting a bug would otherwise have to retype by
+        hand off the screen."""
+        lines = [self._device_detail()]
+        if getattr(self, "stat_cards", None):
+            lines.append("")
+            lines.extend("{}: {}".format(card.name.text(), card.value.text())
+                         for card in self.stat_cards.values())
+        return "\n".join(lines)
+
+    def _copy_device_summary(self):
+        QGuiApplication.clipboard().setText(self._device_summary_text())
 
     def _has_gpu_module(self):
         """True when the expansion bay reported a Graphics Module.
@@ -1437,6 +1484,14 @@ class App(QMainWindow):
         panel.body.addWidget(self.port_empty)
         box.addWidget(panel)
 
+        # Empty until a query has actually run - same reasoning as the
+        # Overview's bay_source caption this mirrors: which command
+        # answered matters, because an EC that only supports the fallback
+        # is not obvious from the table alone.
+        self.ports_source_note = label("", "caption", parent)
+        self.ports_source_note.setWordWrap(True)
+        box.addWidget(self.ports_source_note)
+
         buttons = QGridLayout()
         buttons.setSpacing(theme.SPACE[3])
         queries = navigation.port_queries_for(self.caps)
@@ -1480,6 +1535,15 @@ class App(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         self.port_empty.setVisible(not ports)
+        source = self.readings.get("ports_source")
+        if source and hasattr(self, "ports_source_note"):
+            self.ports_source_note.setText(
+                "Read from {}{}.".format(
+                    source,
+                    " — this EC does not implement --pdports"
+                    if source == "--pdports-chromebook" else ""))
+        elif hasattr(self, "ports_source_note"):
+            self.ports_source_note.setText("")
         for index, port in enumerate(ports):
             watts = port_watts(port)
             # Neither port command can see the card in the bay, only the
@@ -1757,8 +1821,18 @@ class App(QMainWindow):
             return
         self.run(args)
 
+    # A user-typed colour, not CLI output, so this lives here rather than
+    # among parsers.py's output-parsing regexes.
+    RE_HEX_COLOUR = re.compile(r"^[0-9A-Fa-f]{6}$")
+
     def _set_rgb_all(self):
-        hexval = self._editor_value("rgbkbd").lstrip("#") or "FF0000"
+        hexval = self._editor_value("rgbkbd").lstrip("#").strip() or "FF0000"
+        if not self.RE_HEX_COLOUR.match(hexval):
+            self._warn(
+                "Invalid colour",
+                "\"{}\" is not a 6-digit hex colour, e.g. FF0000."
+                .format(hexval))
+            return
         self.run(["--rgbkbd", "0"] + ["0x{}".format(hexval)] * 8)
 
     def _clear_rgb_all(self):
@@ -2808,6 +2882,7 @@ class App(QMainWindow):
         if not temps:
             return
         self.sensor_empty.setVisible(False)
+        values = {}
         for name, value in temps:
             if name not in self.sensor_rows:
                 row = widgets.SensorRow(name)
@@ -2815,6 +2890,23 @@ class App(QMainWindow):
                 self.sensor_rows[name] = row
             self.sensor_rows[name].set_reading(
                 "{} C".format(value), int(value) / TEMP_SCALE_C)
+            values[name] = int(value)
+        self._reorder_sensors(values)
+
+    def _reorder_sensors(self, values):
+        """Hottest sensor first.
+
+        --thermal's own order is neither sorted nor stable between boards,
+        and the one reading actually worth noticing should not be sitting
+        below however many others a board happens to report. Reorders the
+        existing rows in place (removeWidget, not takeAt+deleteLater) —
+        nothing is rebuilt, only repositioned.
+        """
+        ordered = sorted(self.sensor_rows, key=lambda name: -values.get(name, -1))
+        for name in ordered:
+            self.sensor_holder.removeWidget(self.sensor_rows[name])
+        for name in ordered:
+            self.sensor_holder.addWidget(self.sensor_rows[name])
 
     # The order `_fill_bays` arranges ports into before filling rows/the
     # diagram, matching the (row, column) scheme `module_grid` and

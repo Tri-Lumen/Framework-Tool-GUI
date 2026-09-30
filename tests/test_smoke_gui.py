@@ -761,6 +761,152 @@ class TestCloseDuringBackgroundWork(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRailButtonHover(unittest.TestCase):
+    """A RailButton is fully self-painted, so unlike a QPushButton it gets
+    no hover feedback for free - enterEvent/leaveEvent have to ask for a
+    repaint themselves."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_enter_and_leave_do_not_raise_and_request_a_repaint(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QEnterEvent
+
+        from frameworkgui.navigation import RAIL_GROUPS
+        from frameworkgui.widgets import RailButton
+        button = RailButton(RAIL_GROUPS[0])
+        origin = QPointF(0, 0)
+        button.enterEvent(QEnterEvent(origin, origin, origin))
+        button.leaveEvent(QEvent(QEvent.Type.Leave))
+
+    def test_hover_and_active_use_different_icon_tints(self):
+        from frameworkgui.navigation import RAIL_GROUPS
+        from frameworkgui.widgets import RailButton
+        button = RailButton(RAIL_GROUPS[0])
+        self.assertIsNot(button._pixmap("icon"),
+                         button._pixmap("text.secondary"))
+        self.assertIsNot(button._pixmap("text.secondary"),
+                         button._pixmap("accent.icon"))
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRgbValidation(unittest.TestCase):
+    """The RGB row's hex field is free text a person typed, not CLI output -
+    _set_rgb_all has to refuse something that is not a 6-digit hex colour
+    rather than handing framework_tool a bogus --rgbkbd argument."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_a_valid_hex_colour_runs_the_command(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("00ff00")
+        window.run = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_called_once_with(
+            ["--rgbkbd", "0"] + ["0x00ff00"] * 8)
+
+    def test_a_leading_hash_is_accepted(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("#00FF00")
+        window.run = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_called_once()
+
+    def test_an_invalid_colour_is_refused_without_running_anything(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("not-a-colour")
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestSensorOrdering(unittest.TestCase):
+    """The Fans pane's sensor list, hottest first - --thermal's own order
+    is neither sorted nor stable between boards."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def rows_top_to_bottom(self):
+        holder = self.window.sensor_holder
+        names = []
+        for i in range(holder.count()):
+            widget = holder.itemAt(i).widget()
+            for name, row in self.window.sensor_rows.items():
+                if row is widget:
+                    names.append(name)
+        return names
+
+    def test_the_hottest_sensor_is_listed_first(self):
+        self.window._apply_readings({"thermal":
+            "Cool_Zone: 30 C\nHot_Zone: 78 C\nWarm_Zone: 52 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(),
+                         ["Hot_Zone", "Warm_Zone", "Cool_Zone"])
+
+    def test_reordering_on_a_later_read_moves_existing_rows(self):
+        window = self.window
+        window._apply_readings({"thermal": "A: 30 C\nB: 78 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(), ["B", "A"])
+        # The same two sensors, temperatures now reversed.
+        window._apply_readings({"thermal": "A: 90 C\nB: 20 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(), ["A", "B"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPortsSourceNote(unittest.TestCase):
+    """The Ports & modules pane says which command actually answered, the
+    same thing the Overview's bay_source caption already says - an EC that
+    only supports the --pdports-chromebook fallback is not obvious from the
+    table rows alone."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_the_fallback_command_is_named(self):
+        self.window._apply_readings(
+            {"ports_source": "--pdports-chromebook", "ports": []})
+        text = self.window.ports_source_note.text()
+        self.assertIn("--pdports-chromebook", text)
+        self.assertIn("does not implement --pdports", text)
+
+    def test_the_primary_command_is_named_without_a_fallback_note(self):
+        self.window._apply_readings(
+            {"ports_source": "--pdports", "ports": []})
+        text = self.window.ports_source_note.text()
+        self.assertIn("--pdports", text)
+        self.assertNotIn("does not implement", text)
+
+    def test_nothing_read_yet_shows_no_note(self):
+        self.assertEqual(self.window.ports_source_note.text(), "")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestPersistedSection(unittest.TestCase):
     """Relaunching the app returns to the section it was last showing,
     rather than always landing back on Overview. Neither test lets the
@@ -850,6 +996,58 @@ class TestDrawerCopy(unittest.TestCase):
         self.window.drawer._copy()
         self.assertIn("hello from a test",
                       fg.QGuiApplication.clipboard().text())
+
+    def test_current_stream_names_the_selected_tab(self):
+        self.window.drawer.append("ryzenadj", "x\n")
+        self.window.drawer.select("ryzenadj")
+        self.assertEqual(self.window.drawer._current_stream(), "ryzenadj")
+
+    def test_save_writes_the_current_tabs_text_to_the_chosen_path(self):
+        import tempfile
+        from unittest import mock
+        self.window.drawer.append("framework_tool", "saved output\n")
+        self.window.drawer.select("framework_tool")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "out.txt")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                self.window.drawer._save()
+            with open(target, encoding="utf-8") as fh:
+                self.assertIn("saved output", fh.read())
+
+    def test_cancelling_the_save_dialog_writes_nothing(self):
+        from unittest import mock
+        self.window.drawer.append("framework_tool", "x\n")
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            self.window.drawer._save()  # must not raise
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDeviceSummary(unittest.TestCase):
+    """The Overview's "Copy summary" button - a bug-report paste of the
+    board/CPU/firmware detail plus the six stat cards, without asking
+    someone to retype what is on their screen."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_summary_includes_board_detail_and_stat_cards(self):
+        window = self.window
+        window.caps["model"] = "Laptop 13 (AMD Ryzen 7040Series)"
+        window.firmware["ec"] = "azalea_v3.4.113405"
+        window.stat_cards["battery"].set_value("68% · 91.7% health")
+        window._copy_device_summary()
+        text = fg.QGuiApplication.clipboard().text()
+        self.assertIn("Laptop 13", text)
+        self.assertIn("azalea_v3.4.113405", text)
+        self.assertIn("Battery: 68% · 91.7% health", text)
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
