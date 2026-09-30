@@ -40,6 +40,22 @@ processes.** No services, timers, tray icons, or autostart entries on either
 OS. A subprocess is spawned only when the user clicks a button, and exits
 when that command finishes.
 
+Second hard requirement, same weight: **the app works fully offline.**
+Every framework_tool control — Overview, Diagnostics, Fans, Ports &
+modules, Settings, CPU limits — is a local subprocess call and needs no
+network under any circumstance. The **only** network-touching actions in
+the whole app are on the Setup pane, and every one of them is a button a
+person clicks, never something that runs on launch or blocks anything
+else from working: installing/reinstalling a helper tool (`deps.py`,
+Windows-only today) and "Check for updates" (`updater.py`). The Drivers
+pane is the one deliberate, narrower exception to even that: it *links* to
+Framework's downloads pages (no fetch — see `drivers.py`), and a person
+can ask it to pull a linked download down for them, but the pane itself,
+and the rest of the app, work with zero network reachability. Don't make
+any reading, parser, or gating decision depend on a network call — if a
+feature needs one, it has to be an explicit, separate button the way the
+two above are, never folded into something that already works offline.
+
 ## Quick orientation
 
 The app is the `frameworkgui` package; `framework_gui.py` at the repository

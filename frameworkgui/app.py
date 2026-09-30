@@ -1924,6 +1924,8 @@ class App(QMainWindow):
         if not value:
             self._warn("Nothing to set", "Enter a value first.")
             return
+        if row["kind"] == "number" and not self._validate_number_row(row, value):
+            return
         args = list(row["set"]) + [value]
         if row["danger"] and not self._confirm_command(
                 "Set {}".format(row["label"]), args,
@@ -1932,6 +1934,33 @@ class App(QMainWindow):
                 "back."):
             return
         self.run(args)
+
+    def _validate_number_row(self, row, value):
+        """A number row's typed value, checked against its own `min`/`max`
+        before Set ever builds a command — the same instinct as the RGB
+        field's hex check, applied to a text field that is otherwise
+        trusted verbatim. Bounds come from `navigation.SETTINGS_ROWS`, not
+        invented here: most are the percentage the row's own note already
+        documents, and a row with no published bound (charge_rate's upper
+        end) simply has none to check.
+        """
+        try:
+            number = float(value)
+        except ValueError:
+            self._warn("Invalid value",
+                      "\"{}\" is not a number.".format(value))
+            return False
+        unit = row.get("unit", "")
+        low, high = row.get("min"), row.get("max")
+        if low is not None and number < low:
+            self._warn("Out of range", "{} must be at least {}{}.".format(
+                row["label"], low, unit))
+            return False
+        if high is not None and number > high:
+            self._warn("Out of range", "{} must be at most {}{}.".format(
+                row["label"], high, unit))
+            return False
+        return True
 
     # A user-typed colour, not CLI output, so this lives here rather than
     # among parsers.py's output-parsing regexes.

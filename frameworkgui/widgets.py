@@ -484,19 +484,34 @@ class PaneItem(QAbstractButton):
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         active = self.isChecked()
+        hovered = not active and self.underMouse()
         if active:
             painter.fillRect(self.rect(), qcolour("accent.selected"))
             painter.fillRect(0, 0, 2, self.height(),
                              qcolour("accent.bright"))
+        elif hovered:
+            # A fainter version of the same fill an active row gets, so
+            # hovering reads as "about to select" without being mistaken
+            # for the selected row itself - no accent bar, no icon-style
+            # affordance to lean on here the way RailButton has.
+            painter.fillRect(self.rect(), qcolour("row"))
         font = painter.font()
         font.setPixelSize(theme.FONT_SIZES["body"])
         painter.setFont(font)
-        painter.setPen(QColor(colour("text.primary" if active
-                                     else "text.secondary")))
+        painter.setPen(QColor(colour(
+            "text.primary" if (active or hovered) else "text.secondary")))
         painter.drawText(self.rect().adjusted(12, 0, -8, 0),
                          Qt.AlignVCenter | Qt.AlignLeft, self.text())
         painter.end()

@@ -324,17 +324,27 @@ def port_queries_for(caps):
 # fingerprint rows share one, because `--fp-brightness` has no auto of its
 # own and `--fp-led-level auto` is what releases both. A row whose setting
 # genuinely has no automatic mode gets no button rather than a fake one.
+#
+# `min`/`max` (number rows only, optional — omitted or None means no bound
+# on that side) are what `App._validate_number_row` checks before Set runs.
+# They come from what the row's own note already documents as a percentage
+# (0-100), not from a value invented for this file: `charge_rate` has no
+# published upper bound, so only its floor is enforced.
 
 SETTINGS_ROWS = (
     {"key": "charge_limit", "label": "Max charge limit",
      "note": "Held by the EC across reboots", "kind": "number",
-     "unit": "%", "default": "80",
+     "unit": "%", "default": "80", "min": 0, "max": 100,
      "get": ("--charge-limit",), "set": ("--charge-limit",),
      "parse": "charge_limit", "auto": None,
      "requires": "is_laptop", "danger": False},
     {"key": "charge_rate", "label": "Charge rate limit",
      "note": "In C — 1C fills the pack in an hour", "kind": "number",
-     "unit": "C", "default": "1",
+     # No documented upper bound in framework_tool's interface - only
+     # a floor, since a rate has to be positive to mean anything. Real
+     # per-battery limits are the firmware's problem to refuse, not a
+     # number this app would be guessing at.
+     "unit": "C", "default": "1", "min": 0, "max": None,
      # The CLI sets this but has no read for it, so the row shows no Get
      # rather than one that runs something adjacent and calls it the answer.
      "get": None, "set": ("--charge-rate-limit",),
@@ -342,7 +352,7 @@ SETTINGS_ROWS = (
      "requires": "is_laptop", "danger": False},
     {"key": "kblight", "label": "Keyboard backlight",
      "note": "Percentage, 0 turns it off", "kind": "number",
-     "unit": "%", "default": "20",
+     "unit": "%", "default": "20", "min": 0, "max": 100,
      "get": ("--kblight",), "set": ("--kblight",),
      "parse": None, "auto": None,
      "requires": "is_laptop", "danger": False},
@@ -355,7 +365,7 @@ SETTINGS_ROWS = (
      "requires": "is_laptop", "danger": False},
     {"key": "fp_pct", "label": "Fingerprint brightness",
      "note": "Percentage override of the level", "kind": "number",
-     "unit": "%", "default": "55",
+     "unit": "%", "default": "55", "min": 0, "max": 100,
      "get": ("--fp-brightness",), "set": ("--fp-brightness",),
      "parse": "fp_brightness", "auto": ("--fp-led-level", "auto"),
      "requires": "is_laptop", "danger": False},

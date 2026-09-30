@@ -1040,6 +1040,79 @@ class TestCustomCommandHistory(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestNumberRowValidation(unittest.TestCase):
+    """Settings number rows are checked against their own min/max
+    (navigation.SETTINGS_ROWS) before Set ever builds a command."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        if "charge_limit" not in self.window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def row(self, key):
+        return next(r for r in fg.navigation.SETTINGS_ROWS if r["key"] == key)
+
+    def test_a_value_within_bounds_is_accepted(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("80")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_called_once_with(["--charge-limit", "80"])
+
+    def test_a_value_above_the_maximum_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("150")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+    def test_a_negative_value_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("-5")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+
+    def test_non_numeric_text_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("eighty")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+
+    def test_a_row_with_no_published_maximum_accepts_a_large_value(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.settings_widgets["charge_rate"].setText("5")
+        window._set_setting(self.row("charge_rate"))
+        window.run.assert_called_once_with(["--charge-rate-limit", "5"])
+
+    def test_a_row_with_no_published_maximum_still_enforces_its_floor(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_rate"].setText("-1")
+        window._set_setting(self.row("charge_rate"))
+        window.run.assert_not_called()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestRgbValidation(unittest.TestCase):
     """The RGB row's hex field is free text a person typed, not CLI output -
     _set_rgb_all has to refuse something that is not a 6-digit hex colour
@@ -1119,6 +1192,36 @@ class TestSensorOrdering(unittest.TestCase):
         # The same two sensors, temperatures now reversed.
         window._apply_readings({"thermal": "A: 90 C\nB: 20 C\n"})
         self.assertEqual(self.rows_top_to_bottom(), ["A", "B"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPaneItemHover(unittest.TestCase):
+    """PaneItem is self-painted like RailButton, so it gets no hover
+    feedback for free either."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_enter_and_leave_do_not_raise(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QEnterEvent
+
+        from frameworkgui.widgets import PaneItem
+        item = PaneItem("Settings", "settings")
+        origin = QPointF(0, 0)
+        item.enterEvent(QEnterEvent(origin, origin, origin))
+        item.leaveEvent(QEvent(QEvent.Type.Leave))
+
+    def test_hover_never_applies_to_the_active_row(self):
+        # paintEvent's `hovered` must be False whenever the row is
+        # checked, whatever the mouse is doing - the active-row fill and
+        # the hover fill are not meant to combine.
+        from frameworkgui.widgets import PaneItem
+        item = PaneItem("Settings", "settings")
+        item.setChecked(True)
+        active = item.isChecked()
+        hovered = not active and item.underMouse()
+        self.assertFalse(hovered)
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
