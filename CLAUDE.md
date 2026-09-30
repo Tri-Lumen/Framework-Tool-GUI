@@ -78,8 +78,9 @@ frameworkgui/
                         every gated pane (12 tools, 9 port queries, 9 settings
                         rows, 2 charge presets). Keys, not bound methods, so
                         it stays testable.
-  appstate.py          The four persisted UI choices (appearance, drawer
-                        height, last-viewed section, temperature unit).
+  appstate.py          The persisted UI choices (appearance, drawer height,
+                        last-viewed section, temperature unit) and per-bay
+                        labels a person typed for their own expansion cards.
   backdrop.py          Compositing probe + the Windows 11 backdrop call.
   device_images.py     Board string → product photograph, and the chassis
                         dimensions/bay count the Overview drawing is scaled
@@ -447,7 +448,15 @@ failure mode to watch for.
   nothing else does, so that is the only inference made.
   `readings["module_hints"]` is the seam where real per-bay identification
   plugs in if the CLI ever reports it; until then an unidentified bay gets
-  the neutral mark, not a plausible guess.
+  the neutral mark, not a plausible guess. Each bay row's "Label…" button is
+  the manual equivalent — a note a person types themselves ("My 1TB SSD"),
+  never sent anywhere, stored in `appstate.py`'s `bay_labels` keyed by board
+  string and bay key (`App._bay_key_for_index`: the port's own CLI-given
+  name where one exists, else a positional fallback) so it is never shown
+  against the wrong machine or the wrong slot. `_fill_bays` prefers it over
+  the generic name/placeholder once set, on the same reasoning as the
+  neutral mark: this app should never guess, but a person saying what their
+  own hardware is is not a guess.
 
 - **A setting lives on the pane it changes.** The charge presets were
   Diagnostics entries, so running one rewrote two Settings rows from a

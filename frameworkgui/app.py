@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -1228,6 +1229,7 @@ class App(QMainWindow):
         module_grid = QGridLayout()
         module_grid.setSpacing(theme.SPACE[3])
         self.module_rows = []
+        self.module_edit_buttons = []
         # One row per bay the detected chassis actually has - this used to
         # be a hardcoded range(4), which on a Laptop 16 (6 bays) silently
         # dropped two bays from both this list and the diagram's own state
@@ -1250,6 +1252,19 @@ class App(QMainWindow):
             text.addWidget(name)
             text.addWidget(detail)
             row.addLayout(text, 1)
+            # The CLI cannot identify a passive USB-C/USB-A card at all
+            # (see PASSIVE_CARDS_NOTE) - this is the only way this app can
+            # ever say what is actually in a bay, and it is purely local:
+            # nothing here is sent anywhere, unlike everything else this
+            # button's row shows.
+            edit_label = QPushButton("Label…", row_frame)
+            edit_label.setProperty("role", "compact")
+            edit_label.setToolTip(
+                "Set a note for this bay - the CLI cannot identify a "
+                "passive USB-C/USB-A card")
+            edit_label.clicked.connect(
+                lambda _=False, i=index: self._edit_bay_label(i))
+            row.addWidget(edit_label, 0, Qt.AlignVCenter)
             # Two columns, as many rows as the bay count needs. On a 4-bay
             # "sides" chassis this is column = side (0 left, 1 right), row
             # = position (0 back, 1 front) — `_fill_bays` reorders `ports`
@@ -1261,6 +1276,7 @@ class App(QMainWindow):
             # same as the diagram's own fallback for it.
             module_grid.addWidget(row_frame, index % 2, index // 2)
             self.module_rows.append((icon, name, detail))
+            self.module_edit_buttons.append(edit_label)
         bays.addLayout(module_grid, 1)
         panel.body.addLayout(bays)
         self.cards_line = label("", "caption", panel)
@@ -3219,13 +3235,18 @@ class App(QMainWindow):
         # is a legend for these rows, so it has to be the right machine.
         self.chassis.set_chassis(chassis)
         ports = self._ordered_by_bay(self.readings.get("ports") or [], chassis)
+        board = self.caps.get("model", "")
         states = []
         for index, (icon, name, detail) in enumerate(self.module_rows):
             port = ports[index] if index < len(ports) else None
+            bay_key = ((port.get("name") if port and port.get("name")
+                       else None) or "Port {}".format(index + 1))
+            custom = appstate.bay_label(self.settings, board, bay_key)
             if port is None:
                 states.append("empty")
                 icon.set_module(module_icons.UNKNOWN, token="icon")
-                name.setText("Port {}".format(index + 1))
+                name.setText(custom or "Port {}".format(index + 1))
+                name.setToolTip(bay_key if custom else "")
                 detail.setText("not read")
                 continue
             role = (port.get("role") or "?").lower()
@@ -3238,8 +3259,13 @@ class App(QMainWindow):
                 state, token = "idle", "warn"
             states.append(state)
             icon.set_module(module_icons.UNKNOWN, token=token)
-            name.setText(port.get("name")
+            # A label a person typed themselves outranks the generic name -
+            # it is the only way this app can ever say what a passive
+            # USB-C/USB-A card actually is (see PASSIVE_CARDS_NOTE), so
+            # once someone has set one it is more useful than "Port 2".
+            name.setText(custom or port.get("name")
                          or "Port {}".format(port["port"]))
+            name.setToolTip(bay_key if custom else "")
             detail.setText("{} · {}".format(role, self._bay_power(port))
                            if attached else "nothing attached")
         self.chassis.set_states(states)
@@ -3253,6 +3279,38 @@ class App(QMainWindow):
                 "port state from {}, in CLI port order · the CLI cannot see "
                 "which card is fitted".format(source))
         self._fill_cards()
+
+    def _bay_key_for_index(self, index):
+        """The key a bay's custom label is stored under: its own CLI-given
+        name if it has one (stable across rescans on a board with named
+        ports), else a positional fallback. Matches the same logic
+        `_fill_bays` uses so a label set through the dialog is the same
+        label `_fill_bays` then looks up and shows.
+        """
+        chassis = device_images.chassis_for(self.caps.get("model", ""))
+        ports = self._ordered_by_bay(self.readings.get("ports") or [], chassis)
+        port = ports[index] if index < len(ports) else None
+        return ((port.get("name") if port and port.get("name") else None)
+               or "Port {}".format(index + 1))
+
+    def _edit_bay_label(self, index):
+        """Let a person say what is actually in a bay - purely local
+        metadata, never sent anywhere, and the only way this app can ever
+        name a passive USB-C/USB-A card (see PASSIVE_CARDS_NOTE).
+        """
+        board = self.caps.get("model", "")
+        bay_key = self._bay_key_for_index(index)
+        current = appstate.bay_label(self.settings, board, bay_key)
+        text, ok = QInputDialog.getText(
+            self, "Label this bay",
+            "A note only you see for this bay - the CLI cannot identify a "
+            "passive USB-C/USB-A card, e.g. \"My 1TB SSD\":",
+            text=current)
+        if not ok:
+            return
+        appstate.set_bay_label(self.settings, board, bay_key, text)
+        appstate.save(self.settings)
+        self._fill_bays()
 
     # Why three bays with cards in them can all read "nothing attached".
     PASSIVE_CARDS_NOTE = ("USB-C and USB-A cards are passive passthroughs — "

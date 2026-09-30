@@ -1324,6 +1324,70 @@ class TestPaneItemHover(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestBayLabels(unittest.TestCase):
+    """A person's own note for a bay - the only way this app can ever name
+    a passive USB-C/USB-A card, since the CLI cannot identify one. Purely
+    local: nothing here is sent to a command."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_every_bay_row_has_a_label_button(self):
+        self.assertEqual(len(self.window.module_edit_buttons),
+                         len(self.window.module_rows))
+
+    def test_setting_a_label_shows_it_in_place_of_the_generic_name(self):
+        from unittest import mock
+        window = self.window
+        window._apply_readings({"ports": []})  # every row reads "not read"
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        _icon, name, _detail = window.module_rows[0]
+        self.assertEqual(name.text(), "My 1TB SSD")
+
+    def test_the_label_is_scoped_to_the_bay_key_and_persists(self):
+        from unittest import mock
+        window = self.window
+        key = window._bay_key_for_index(0)
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        self.assertEqual(
+            fg.appstate.bay_label(fg.appstate.load(),
+                                  window.caps.get("model", ""), key),
+            "My 1TB SSD")
+
+    def test_cancelling_the_dialog_changes_nothing(self):
+        from unittest import mock
+        window = self.window
+        before = window.module_rows[0][1].text()
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("ignored", False)):
+            window._edit_bay_label(0)
+        self.assertEqual(window.module_rows[0][1].text(), before)
+
+    def test_clearing_the_label_falls_back_to_the_generic_name(self):
+        from unittest import mock
+        window = self.window
+        window._apply_readings({"ports": []})
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("", True)):
+            window._edit_bay_label(0)
+        self.assertEqual(window.module_rows[0][1].text(), "Port 1")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestPortsSourceNote(unittest.TestCase):
     """The Ports & modules pane says which command actually answered, the
     same thing the Overview's bay_source caption already says - an EC that

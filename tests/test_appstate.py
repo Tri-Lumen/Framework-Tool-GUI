@@ -129,6 +129,87 @@ class TestNormalise(unittest.TestCase):
         state = appstate.normalise({"temp_unit": "F"})
         self.assertEqual(state["temp_unit"], "F")
 
+    def test_a_well_formed_bay_label_is_kept(self):
+        state = appstate.normalise(
+            {"bay_labels": {"Laptop 13": {"Left Front": "My SSD"}}})
+        self.assertEqual(state["bay_labels"],
+                         {"Laptop 13": {"Left Front": "My SSD"}})
+
+    def test_bay_labels_default_to_empty(self):
+        self.assertEqual(appstate.normalise({})["bay_labels"], {})
+
+    def test_a_non_dict_bay_labels_value_is_dropped(self):
+        for value in (None, [], "Left Front", 3):
+            self.assertEqual(
+                appstate.normalise({"bay_labels": value})["bay_labels"], {})
+
+    def test_a_non_dict_board_entry_is_dropped(self):
+        state = appstate.normalise({"bay_labels": {"Laptop 13": "not a dict"}})
+        self.assertEqual(state["bay_labels"], {})
+
+    def test_a_non_string_label_is_dropped_but_siblings_survive(self):
+        state = appstate.normalise({"bay_labels": {
+            "Laptop 13": {"Left Front": "My SSD", "Right Back": 5}}})
+        self.assertEqual(state["bay_labels"],
+                         {"Laptop 13": {"Left Front": "My SSD"}})
+
+    def test_a_blank_label_is_dropped(self):
+        state = appstate.normalise(
+            {"bay_labels": {"Laptop 13": {"Left Front": "   "}}})
+        self.assertEqual(state["bay_labels"], {})
+
+    def test_a_board_with_no_surviving_labels_is_dropped_entirely(self):
+        state = appstate.normalise(
+            {"bay_labels": {"Laptop 13": {"Left Front": ""}}})
+        self.assertEqual(state["bay_labels"], {})
+
+    def test_a_long_label_is_truncated(self):
+        state = appstate.normalise(
+            {"bay_labels": {"Laptop 13": {"Left Front": "x" * 500}}})
+        self.assertEqual(len(state["bay_labels"]["Laptop 13"]["Left Front"]),
+                         appstate.BAY_LABEL_MAX)
+
+
+class TestBayLabelHelpers(unittest.TestCase):
+
+    def test_an_unset_bay_reads_as_empty(self):
+        self.assertEqual(appstate.bay_label({}, "Laptop 13", "Left Front"), "")
+
+    def test_set_then_read(self):
+        state = appstate.normalise({})
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "My SSD")
+        self.assertEqual(
+            appstate.bay_label(state, "Laptop 13", "Left Front"), "My SSD")
+
+    def test_set_is_scoped_to_the_board(self):
+        state = appstate.normalise({})
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "My SSD")
+        self.assertEqual(
+            appstate.bay_label(state, "Laptop 16", "Left Front"), "")
+
+    def test_clearing_with_an_empty_string_removes_the_label(self):
+        state = appstate.normalise({})
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "My SSD")
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "")
+        self.assertEqual(
+            appstate.bay_label(state, "Laptop 13", "Left Front"), "")
+        self.assertNotIn("Laptop 13", state["bay_labels"])
+
+    def test_clearing_a_board_with_other_labels_keeps_the_others(self):
+        state = appstate.normalise({})
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "My SSD")
+        appstate.set_bay_label(state, "Laptop 13", "Right Back", "My HDD")
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "")
+        self.assertEqual(
+            appstate.bay_label(state, "Laptop 13", "Right Back"), "My HDD")
+
+    def test_whitespace_only_is_treated_as_clearing(self):
+        state = appstate.normalise({})
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "My SSD")
+        appstate.set_bay_label(state, "Laptop 13", "Left Front", "   ")
+        self.assertEqual(
+            appstate.bay_label(state, "Laptop 13", "Left Front"), "")
+
 
 class TestLoad(unittest.TestCase):
 
@@ -138,7 +219,8 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(state, {"appearance": "opaque", "drawer_height": 320,
                                  "last_section": appstate.DEFAULTS[
                                      "last_section"],
-                                 "temp_unit": appstate.DEFAULTS["temp_unit"]})
+                                 "temp_unit": appstate.DEFAULTS["temp_unit"],
+                                 "bay_labels": {}})
 
     def test_missing_file_gives_defaults(self):
         state = appstate.load("/nowhere",
@@ -170,7 +252,8 @@ class TestSave(unittest.TestCase):
                          {"appearance": "opaque",
                           "drawer_height": theme.DRAWER_MAX,
                           "last_section": appstate.DEFAULTS["last_section"],
-                          "temp_unit": appstate.DEFAULTS["temp_unit"]})
+                          "temp_unit": appstate.DEFAULTS["temp_unit"],
+                          "bay_labels": {}})
         self.assertEqual(made, ["/nowhere"])
 
     def test_a_failed_write_is_reported_not_raised(self):
@@ -188,14 +271,16 @@ class TestSave(unittest.TestCase):
     def test_round_trip(self):
         writer = Writer()
         appstate.save({"appearance": "opaque", "drawer_height": 300,
-                       "last_section": "power", "temp_unit": "F"},
+                       "last_section": "power", "temp_unit": "F",
+                       "bay_labels": {"Laptop 13": {"Left Front": "My SSD"}}},
                       "/nowhere/settings.json", opener=writer,
                       makedirs=lambda _d: None)
         self.assertEqual(
             appstate.load("/nowhere/settings.json",
                           opener=reader(writer.text)),
             {"appearance": "opaque", "drawer_height": 300,
-             "last_section": "power", "temp_unit": "F"})
+             "last_section": "power", "temp_unit": "F",
+             "bay_labels": {"Laptop 13": {"Left Front": "My SSD"}}})
 
 
 if __name__ == "__main__":
