@@ -938,6 +938,53 @@ failure mode to watch for.
   updated installer, unattended and as an elevated process, is not
   something this app should do on a user's behalf. Checking for an update
   and downloading it are not the exception — only running one would be.
+- **A tray icon.** It showed up on an early pass over what a "system
+  monitor" feature could look like — a persistent battery/thermal readout
+  living in the tray. It is a background process by definition (something
+  alive between button clicks, on both OSes), so the same rule that rules
+  out a systemd unit or a Windows service for persisting power limits rules
+  this out too. It was never built, not even behind a flag.
+- **Fully unattended install** (fetch the latest release, verify it, run
+  the installer, relaunch, with no confirmation step). The user was asked
+  directly whether the updater should do this or only check-and-download,
+  and chose check-and-download — see "Running downloaded installers" above
+  for why that also matches the project's existing position on installers
+  it downloads itself.
+- **A systemd unit / Task Scheduler task that reapplies CPU limits at
+  boot.** The natural follow-up to "limits don't survive a reboot" is "so
+  write something that reapplies them on login" — which is exactly the
+  background-process trade the first bullet in this section already
+  declines. Noted here again because it is the single most likely feature
+  request this project will get once someone actually uses the CPU limits
+  pane daily.
+- **Translations / i18n.** Every string in `navigation.py`, `app.py` and
+  the theme is written in place rather than looked up by key, and no
+  locale-selection mechanism exists anywhere in the app. Framework sells in
+  enough locales that this is a real gap, not a hypothetical one — but
+  retrofitting a string table across a UI this size is a large, mechanical
+  project of its own, better done as a deliberate pass than folded into
+  unrelated feature work.
+- **An Overview "health summary" card** (a single badge rolling up battery
+  health, thermal headroom and privacy-switch state into one "looks fine" /
+  "check this" verdict). Skipped for two reasons, not just one: framework_tool
+  reports a raw battery-health percentage and nothing else — Framework
+  documents no "this percentage means degraded" threshold, and the project's
+  standing rule (see `detect_model()`'s fail-open default and every parser's
+  raw-output fallback) is to show what the CLI said rather than a judgement
+  call this app has no basis for. Separately, a privacy-switch rollup would
+  need `run()`/`_single_worker()` (the Ports & modules query path) to start
+  populating `self.readings`, which today it never does — it only logs to
+  the drawer — and that is a bigger, riskier change to the query pipeline
+  than a summary card justifies on its own. Worth revisiting if Framework
+  ever documents real health thresholds, or if the ports pipeline gets
+  reworked for another reason first.
+- **A true light theme.** `theme.py`'s two appearances (`acrylic`/`opaque`,
+  `theme.APPEARANCES`) are both dark surfaces from the same design handoff
+  — the handoff never specified a light palette, and inventing token values
+  for one wasn't a small addition the same way a new settings row is. The
+  contrast work this session did (`relative_luminance`/`contrast_ratio` in
+  `theme.py`, `tests/test_theme.TestTextContrast`) checked the existing dark
+  tokens; it did not add a second palette.
 
 ## Releasing
 
