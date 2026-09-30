@@ -1,13 +1,16 @@
 """
 The handful of UI choices that survive a relaunch.
 
-Three things persist: which appearance the user picked (`acrylic` or
+Four things persist: which appearance the user picked (`acrylic` or
 `opaque`), both from the design's State table; how tall they dragged the
-output drawer; and which section they last had open, so relaunching the app
-returns to where they left off instead of always landing on Overview.
-Nothing about the hardware is cached here — every reading in the app comes
-from running a command, and a stale cached one would be worse than a blank
-field.
+output drawer; which section they last had open, so relaunching the app
+returns to where they left off instead of always landing on Overview; and
+which unit temperature readings display in (`C` or `F`). Nothing about the
+hardware is cached here — every reading in the app comes from running a
+command, and a stale cached one would be worse than a blank field. The
+temperature unit is a display choice, not a reading, which is why it
+belongs here and not in `readings`: it is the same "C" whether or not a
+command has ever run.
 
 Stdlib only, no toolkit import, and every read and write goes through an
 injectable callable so the whole module is testable without touching a real
@@ -22,10 +25,13 @@ import os
 
 from . import navigation, theme
 
+TEMP_UNITS = ("C", "F")
+
 DEFAULTS = {
     "appearance": theme.ACRYLIC,
     "drawer_height": theme.DRAWER_DEFAULT,
     "last_section": navigation.SECTIONS[0],
+    "temp_unit": TEMP_UNITS[0],
 }
 
 FILENAME = "settings.json"
@@ -79,6 +85,9 @@ def normalise(raw):
     section = raw.get("last_section")
     if section in navigation.SECTIONS:
         state["last_section"] = section
+    unit = raw.get("temp_unit")
+    if unit in TEMP_UNITS:
+        state["temp_unit"] = unit
     return state
 
 

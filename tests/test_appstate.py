@@ -121,6 +121,14 @@ class TestNormalise(unittest.TestCase):
     def test_default_section_is_a_real_one(self):
         self.assertIn(appstate.DEFAULTS["last_section"], navigation.SECTIONS)
 
+    def test_unknown_temp_unit_is_ignored(self):
+        state = appstate.normalise({"temp_unit": "K"})
+        self.assertEqual(state["temp_unit"], appstate.DEFAULTS["temp_unit"])
+
+    def test_known_temp_unit_is_kept(self):
+        state = appstate.normalise({"temp_unit": "F"})
+        self.assertEqual(state["temp_unit"], "F")
+
 
 class TestLoad(unittest.TestCase):
 
@@ -129,7 +137,8 @@ class TestLoad(unittest.TestCase):
         state = appstate.load("/nowhere", opener=reader(text))
         self.assertEqual(state, {"appearance": "opaque", "drawer_height": 320,
                                  "last_section": appstate.DEFAULTS[
-                                     "last_section"]})
+                                     "last_section"],
+                                 "temp_unit": appstate.DEFAULTS["temp_unit"]})
 
     def test_missing_file_gives_defaults(self):
         state = appstate.load("/nowhere",
@@ -160,7 +169,8 @@ class TestSave(unittest.TestCase):
         self.assertEqual(json.loads(writer.text),
                          {"appearance": "opaque",
                           "drawer_height": theme.DRAWER_MAX,
-                          "last_section": appstate.DEFAULTS["last_section"]})
+                          "last_section": appstate.DEFAULTS["last_section"],
+                          "temp_unit": appstate.DEFAULTS["temp_unit"]})
         self.assertEqual(made, ["/nowhere"])
 
     def test_a_failed_write_is_reported_not_raised(self):
@@ -178,14 +188,14 @@ class TestSave(unittest.TestCase):
     def test_round_trip(self):
         writer = Writer()
         appstate.save({"appearance": "opaque", "drawer_height": 300,
-                       "last_section": "power"},
+                       "last_section": "power", "temp_unit": "F"},
                       "/nowhere/settings.json", opener=writer,
                       makedirs=lambda _d: None)
         self.assertEqual(
             appstate.load("/nowhere/settings.json",
                           opener=reader(writer.text)),
             {"appearance": "opaque", "drawer_height": 300,
-             "last_section": "power"})
+             "last_section": "power", "temp_unit": "F"})
 
 
 if __name__ == "__main__":

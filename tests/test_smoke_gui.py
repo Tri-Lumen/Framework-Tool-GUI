@@ -1156,6 +1156,56 @@ class TestRgbValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestTemperatureUnit(unittest.TestCase):
+    """The pane footer's C/F toggle - a display-only preference applied to
+    the Overview CPU card and the Fans sensor rows, persisted the same way
+    the appearance choice is. CPU limits' Tctl setting is untouched: it is
+    a value sent to a command, not a reading, and stays in Celsius."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+        # Several of these persist a choice via appstate.save() - reset so
+        # it never leaks into a later test's fresh fg.App().
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_defaults_to_celsius(self):
+        self.assertEqual(self.window.temp_unit, "C")
+        self.assertEqual(self.window.unit_segment._value, "C")
+
+    def test_switching_to_fahrenheit_updates_the_cpu_card(self):
+        window = self.window
+        window._apply_readings({"thermal": "CPU: 61 C\n"})
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "61 C")
+        window._set_temp_unit("F")
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "142 F")
+
+    def test_switching_to_fahrenheit_updates_sensor_rows(self):
+        window = self.window
+        window._apply_readings({"thermal": "F75303_Local: 30 C\n"})
+        window._set_temp_unit("F")
+        self.assertEqual(
+            window.sensor_rows["F75303_Local"].value.text(), "86 F")
+
+    def test_the_choice_is_persisted(self):
+        window = self.window
+        window._set_temp_unit("F")
+        self.assertEqual(fg.appstate.load()["temp_unit"], "F")
+
+    def test_switching_back_to_celsius_restores_the_original_reading(self):
+        window = self.window
+        window._apply_readings({"thermal": "CPU: 61 C\n"})
+        window._set_temp_unit("F")
+        window._set_temp_unit("C")
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "61 C")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestSensorOrdering(unittest.TestCase):
     """The Fans pane's sensor list, hottest first - --thermal's own order
     is neither sorted nor stable between boards."""
@@ -1192,6 +1242,34 @@ class TestSensorOrdering(unittest.TestCase):
         # The same two sensors, temperatures now reversed.
         window._apply_readings({"thermal": "A: 90 C\nB: 20 C\n"})
         self.assertEqual(self.rows_top_to_bottom(), ["A", "B"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestElevationDot(unittest.TestCase):
+    """The status bar's elevation dot mirrors whatever text
+    status_elevation shows - a colour, not a second source of truth."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_the_dot_matches_the_current_elevation_text(self):
+        window = self.window
+        window._refresh_statusbar()
+        expected = window.ELEVATION_DOT[window.status_elevation.text()]
+        self.assertEqual(window.elevation_dot._token, expected)
+
+    def test_every_elevation_state_maps_to_a_real_token(self):
+        from frameworkgui import theme
+        palette = theme.palette(theme.OPAQUE)
+        for state, token in self.window.ELEVATION_DOT.items():
+            self.assertIn(token, palette, "{} maps to an unknown token"
+                          .format(state))
 
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")

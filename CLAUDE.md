@@ -78,8 +78,8 @@ frameworkgui/
                         every gated pane (12 tools, 9 port queries, 9 settings
                         rows, 2 charge presets). Keys, not bound methods, so
                         it stays testable.
-  appstate.py          The three persisted UI choices (appearance, drawer
-                        height, last-viewed section).
+  appstate.py          The four persisted UI choices (appearance, drawer
+                        height, last-viewed section, temperature unit).
   backdrop.py          Compositing probe + the Windows 11 backdrop call.
   device_images.py     Board string → product photograph, and the chassis
                         dimensions/bay count the Overview drawing is scaled
@@ -481,6 +481,18 @@ failure mode to watch for.
   keeps the existing `SensorRow` widgets (never rebuilt, so `TestBusyGuard`-
   style state loss does not apply here) and `_reorder_sensors` repositions
   them in the layout with `removeWidget`/`addWidget` on every read.
+
+- **Temperature readings can display in Celsius or Fahrenheit; settings in
+  Celsius never do.** The pane footer's "Temperature" toggle (next to
+  Appearance, persisted the same way) only touches read-only displays —
+  the Overview CPU card and the Fans sensor rows, both through
+  `App._format_temp`. The CPU limits pane's Tctl field is a *setting* sent
+  to RyzenAdj/RAPL in Celsius, not a reading, and is deliberately untouched:
+  converting it would mean converting a typed value back before it reaches
+  a command, which is exactly the kind of unit mismatch `power.py`'s "watch
+  the units" note already warns about elsewhere. `parsers.celsius_to_fahrenheit`
+  is the one place the arithmetic happens, kept stdlib-only and tested
+  without a display, the same as every other pure conversion in this app.
 
 - **The Console pane remembers what you actually ran, apart from the
   curated defaults.** `navigation.RECENT_SUGGESTIONS` is a fixed list;

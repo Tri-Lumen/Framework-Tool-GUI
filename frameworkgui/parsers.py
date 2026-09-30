@@ -347,6 +347,15 @@ def parse_firmware(versions_text):
 RE_FIRMWARE_HASHES = re.compile(r"-(?:\w+:[0-9a-f]{4,},?)+$", re.IGNORECASE)
 
 
+def celsius_to_fahrenheit(celsius):
+    """A Celsius reading (from RE_TEMP, always a whole-number CLI reading)
+    as Fahrenheit. Display-only — the CLI and every temperature-setting
+    flag (RyzenAdj's Tctl included) stay in Celsius, so nothing here ever
+    feeds a value back into a command.
+    """
+    return celsius * 9.0 / 5.0 + 32.0
+
+
 def short_firmware(value, limit=28):
     """A firmware version at the length a sub-line can carry.
 

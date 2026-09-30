@@ -109,6 +109,7 @@ from .parsers import (
     RE_TEMP,
     ac_connected,
     bay_orientation,
+    celsius_to_fahrenheit,
     detect_model,
     parse_charge_limit,
     parse_firmware,
@@ -650,6 +651,7 @@ class App(QMainWindow):
         self.settings = appstate.load()
         self.appearance = self.settings["appearance"]
         self.drawer_height = self.settings["drawer_height"]
+        self.temp_unit = self.settings["temp_unit"]
         self.compositing, self.compositing_reason = \
             backdrop.translucency_state(environ=os.environ)
         if not self.compositing:
@@ -863,6 +865,12 @@ class App(QMainWindow):
         self.segment.chosen.connect(self._set_appearance)
         self.segment.set_choices_enabled(self.compositing)
         footer_box.addWidget(self.segment)
+        footer_box.addSpacing(theme.SPACE[2])
+        footer_box.addWidget(label("Temperature", "caption", footer))
+        self.unit_segment = widgets.Segmented(appstate.TEMP_UNITS, footer)
+        self.unit_segment.set_value(self.temp_unit)
+        self.unit_segment.chosen.connect(self._set_temp_unit)
+        footer_box.addWidget(self.unit_segment)
         box.addWidget(footer)
         self.pane = pane
         return pane
@@ -874,6 +882,8 @@ class App(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(12, 0, 12, 0)
         row.setSpacing(theme.SPACE[6])
+        self.elevation_dot = widgets.StatusDot(bar)
+        row.addWidget(self.elevation_dot)
         self.status_elevation = label("", "status", bar)
         self.status_binary = label("", "status", bar)
         self.status_modules = label("", "status", bar)
@@ -887,6 +897,12 @@ class App(QMainWindow):
         self._refresh_statusbar()
         return bar
 
+    # elevation -> the dot's colour: full elevation is good, pkexec asks a
+    # prompt per command (or several, on a multi-step tool) so it is a
+    # middle ground, and unelevated on Linux means most buttons will fail.
+    ELEVATION_DOT = {"Elevated": "ok", "pkexec": "warn",
+                     "Not elevated": "danger.border"}
+
     def _refresh_statusbar(self):
         if is_root():
             elevation = "Elevated"
@@ -895,6 +911,7 @@ class App(QMainWindow):
         else:
             elevation = "Not elevated"
         self.status_elevation.setText(elevation)
+        self.elevation_dot.set_state(self.ELEVATION_DOT[elevation])
         name = os.path.basename(self.binary) or "framework_tool"
         self.status_binary.setText(
             "{} {}".format(name, self.tool_version).strip())
@@ -978,6 +995,15 @@ class App(QMainWindow):
     def _toggle_appearance(self):
         self._set_appearance(theme.OPAQUE if self.appearance == theme.ACRYLIC
                              else theme.ACRYLIC)
+
+    def _set_temp_unit(self, unit):
+        self.temp_unit = unit
+        self.settings["temp_unit"] = unit
+        appstate.save(self.settings)
+        # Re-render from what is already in self.readings - no command
+        # runs to change units, the same _apply_readings({}) idiom
+        # _build_pages() uses to redraw after a rebuild.
+        self._apply_readings({})
 
     def _resize_drawer(self, height):
         self.drawer_height = appstate.clamp_drawer(height)
@@ -3039,8 +3065,19 @@ class App(QMainWindow):
         self.stat_cards["cycles"].set_value(
             cycles.group(1) if cycles else "—")
 
-    @staticmethod
-    def _cpu_temp(temps):
+    def _format_temp(self, celsius):
+        """A Celsius reading in whichever unit the Temperature toggle picked.
+
+        Display-only, and only for read-only readings (this card, and the
+        Fans pane's sensor rows) — anything that is itself a *setting* in
+        Celsius, like the CPU limits pane's Tctl, stays in Celsius so a
+        typed value is never silently sent to a command in the wrong unit.
+        """
+        if self.temp_unit == "F":
+            return "{:.0f} F".format(celsius_to_fahrenheit(celsius))
+        return "{} C".format(celsius)
+
+    def _cpu_temp(self, temps):
         """The package temperature from `--thermal`'s sensor list.
 
         Sensor names differ per board, so this prefers one that names the
@@ -3051,8 +3088,8 @@ class App(QMainWindow):
             return "—"
         for name, value in temps:
             if any(tag in name.lower() for tag in ("cpu", "apu", "tctl")):
-                return "{} C".format(value)
-        return "{} C".format(max(int(v) for _n, v in temps))
+                return self._format_temp(int(value))
+        return self._format_temp(max(int(v) for _n, v in temps))
 
     @staticmethod
     def _ac_summary(ac, power_text):
@@ -3087,7 +3124,7 @@ class App(QMainWindow):
                 self.sensor_holder.addWidget(row)
                 self.sensor_rows[name] = row
             self.sensor_rows[name].set_reading(
-                "{} C".format(value), int(value) / TEMP_SCALE_C)
+                self._format_temp(int(value)), int(value) / TEMP_SCALE_C)
             values[name] = int(value)
         self._reorder_sensors(values)
 

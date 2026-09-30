@@ -643,6 +643,33 @@ def parse_colour(value):
     raise ValueError("unrecognised colour: {!r}".format(value))
 
 
+def relative_luminance(rgb):
+    """WCAG relative luminance of an (r, g, b[, a]) tuple, 0.0-1.0.
+
+    Ignores alpha — this is for auditing text-on-surface contrast, and a
+    translucent surface's actual luminance depends on whatever it is
+    composited over, which this module has no way to know. Callers stick
+    to the opaque appearance's flat surfaces for that reason.
+    """
+    def linearise(channel):
+        c = channel / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb[0], rgb[1], rgb[2]
+    return 0.2126 * linearise(r) + 0.7152 * linearise(g) + 0.0722 * linearise(b)
+
+
+def contrast_ratio(colour_a, colour_b):
+    """WCAG contrast ratio between two token values (anything `parse_colour`
+    accepts) — 1.0 (identical) to 21.0 (black on white). 4.5 is the AA
+    threshold for normal-size text; 3.0 is AA for large text and non-text
+    UI components (borders, icons) per WCAG 1.4.11.
+    """
+    luminance_a = relative_luminance(parse_colour(colour_a))
+    luminance_b = relative_luminance(parse_colour(colour_b))
+    lighter, darker = max(luminance_a, luminance_b), min(luminance_a, luminance_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 def bar_colour(fraction, warm_at=0.60):
     """Fill colour for a sensor/progress bar, by how full it is.
 

@@ -575,6 +575,31 @@ class Segmented(QWidget):
         painter.end()
 
 
+class StatusDot(QWidget):
+    """A small filled circle, for a status that reads faster as colour than
+    as text — the status bar's elevation indicator. `set_state` takes any
+    theme token name; the caller decides what state means what colour."""
+
+    SIZE = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self._token = "icon"
+
+    def set_state(self, token):
+        self._token = token
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(qcolour(self._token))
+        painter.drawEllipse(0, 0, self.SIZE, self.SIZE)
+        painter.end()
+
+
 class Spinner(QWidget):
     """The 10px running indicator inside the Diagnostics progress badge.
 
