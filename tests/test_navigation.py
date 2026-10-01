@@ -173,6 +173,23 @@ class TestSettingsRows(unittest.TestCase):
             if row["kind"] == "choice":
                 self.assertIn(row["default"], row["choices"])
 
+    def test_number_rows_declare_sane_bounds(self):
+        for row in navigation.SETTINGS_ROWS:
+            if row["kind"] != "number":
+                continue
+            low, high = row.get("min"), row.get("max")
+            default = float(row["default"])
+            if low is not None:
+                self.assertLessEqual(low, default,
+                                     "{} default is below its own min"
+                                     .format(row["key"]))
+            if high is not None:
+                self.assertLessEqual(default, high,
+                                     "{} default is above its own max"
+                                     .format(row["key"]))
+                self.assertLess(low if low is not None else -1, high,
+                                "{} has min >= max".format(row["key"]))
+
 
 if __name__ == "__main__":
     unittest.main()

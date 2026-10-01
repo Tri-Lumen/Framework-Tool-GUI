@@ -53,14 +53,23 @@ import time
 import webbrowser
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import (
+    QFontDatabase,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -74,6 +83,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import (
+    __version__,
     app_icon,
     appstate,
     backdrop,
@@ -84,6 +94,7 @@ from . import (
     navigation,
     power,
     theme,
+    updater,
     widgets,
 )
 from .parsers import (
@@ -99,6 +110,7 @@ from .parsers import (
     RE_TEMP,
     ac_connected,
     bay_orientation,
+    celsius_to_fahrenheit,
     detect_model,
     parse_charge_limit,
     parse_firmware,
@@ -329,12 +341,22 @@ class Drawer(QWidget):
         self.tab_row.setSpacing(0)
         self.tab_row.addStretch(1)
 
+        self.copy_btn = QPushButton("copy", tabs)
+        self.copy_btn.setProperty("role", "drawerTool")
+        self.copy_btn.setToolTip("Copy this tab's output to the clipboard")
+        self.copy_btn.clicked.connect(self._copy)
+        self.save_btn = QPushButton("save", tabs)
+        self.save_btn.setProperty("role", "drawerTool")
+        self.save_btn.setToolTip("Save this tab's output to a file")
+        self.save_btn.clicked.connect(self._save)
         self.wrap_btn = QPushButton("wrap", tabs)
         self.wrap_btn.setProperty("role", "drawerTool")
         self.wrap_btn.clicked.connect(self._toggle_wrap)
         self.clear_btn = QPushButton("clear", tabs)
         self.clear_btn.setProperty("role", "drawerTool")
         self.clear_btn.clicked.connect(self._clear)
+        self.tab_row.addWidget(self.copy_btn)
+        self.tab_row.addWidget(self.save_btn)
         self.tab_row.addWidget(self.wrap_btn)
         self.tab_row.addWidget(self.clear_btn)
         box.addWidget(tabs)
@@ -344,6 +366,10 @@ class Drawer(QWidget):
 
         self._tabs = {}
         self._views = {}
+        # Set by App after construction - a hook rather than a signal
+        # because there is exactly one listener and it wants no arguments
+        # beyond "this happened".
+        self.on_copy = None
         self.ensure("framework_tool")
 
     def ensure(self, stream):
@@ -380,6 +406,33 @@ class Drawer(QWidget):
         view = self.current_view()
         if view:
             view.set_wrap(not view.wraps())
+
+    def _copy(self):
+        view = self.current_view()
+        if view:
+            QGuiApplication.clipboard().setText(view.view.toPlainText())
+            if self.on_copy:
+                self.on_copy("Copied to clipboard")
+
+    def _current_stream(self):
+        view = self.current_view()
+        return next((s for s, v in self._views.items() if v is view), None)
+
+    def _save(self):
+        view = self.current_view()
+        if view is None:
+            return
+        stream = self._current_stream() or "output"
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save {} output".format(stream),
+            "{}.txt".format(stream), "Text files (*.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(view.view.toPlainText())
+        except OSError as e:
+            QMessageBox.warning(self, "Could not save", str(e))
 
     def _clear(self):
         view = self.current_view()
@@ -554,6 +607,10 @@ class App(QMainWindow):
     sig_progress = Signal(object)
     sig_readings = Signal(object)
     sig_fill = Signal(str, str)
+    sig_update_checked = Signal(object)
+    sig_update_downloaded = Signal(str)
+    sig_report_saved = Signal(str)
+    sig_chain_step = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -563,6 +620,11 @@ class App(QMainWindow):
             and (IN_FLATPAK or shutil.which("pkexec") is not None))
         self._busy = False
         self._cancel = False
+        # Every command runs on a daemon thread (see run_tool/_rescan) that
+        # outlives the window if it is closed mid-run. Without this, that
+        # thread's next _log/set_status/etc. call emits a signal into a
+        # QObject Qt has already started tearing down - see _emit.
+        self._closing = False
 
         # Fail-open defaults: show every control until (or unless) detection
         # narrows things down.
@@ -579,6 +641,15 @@ class App(QMainWindow):
         self.firmware = {"ec": "", "bios": ""}
         self.tool_version = ""
         self.readings = {}
+        self._last_scan_at = None
+        self._update_result = None
+        self._update_path = None
+        # Session-only, most-recent-first, capped and deduplicated below -
+        # separate from navigation.RECENT_SUGGESTIONS, which are curated
+        # defaults rather than what this user actually ran.
+        self._custom_history = []
+        self._last_report_path = None
+        self._running_all = False
         self.power_backend = None
         # Power limits read back before this session changed them, so
         # "Restore previous" is possible without a reboot. Same instinct as
@@ -589,13 +660,14 @@ class App(QMainWindow):
         self.settings = appstate.load()
         self.appearance = self.settings["appearance"]
         self.drawer_height = self.settings["drawer_height"]
+        self.temp_unit = self.settings["temp_unit"]
         self.compositing, self.compositing_reason = \
             backdrop.translucency_state(environ=os.environ)
         if not self.compositing:
             self.appearance = theme.OPAQUE
         self.banner_dismissed = False
 
-        self.section = "overview"
+        self.section = self.settings["last_section"]
         self.rail_key = "overview"
         self.pages = {}
         self.tool_rows = {}
@@ -606,6 +678,7 @@ class App(QMainWindow):
         self.setMinimumSize(QSize(*theme.MIN_WINDOW_SIZE))
         self.resize(QSize(*theme.WINDOW_SIZE))
         self._build_chrome()
+        self._build_shortcuts()
         self._build_pages()
         self._apply_appearance()
         self._select_section(self.section)
@@ -617,7 +690,11 @@ class App(QMainWindow):
                 (self.sig_tool_done, self._tool_done),
                 (self.sig_progress, self._on_progress),
                 (self.sig_readings, self._apply_readings),
-                (self.sig_fill, self._on_fill)):
+                (self.sig_fill, self._on_fill),
+                (self.sig_update_checked, self._apply_update_check),
+                (self.sig_update_downloaded, self._show_update_path),
+                (self.sig_report_saved, self._show_report_path),
+                (self.sig_chain_step, self._on_chain_step)):
             signal.connect(slot)
 
         if IS_LINUX and not is_root() and not self.use_pkexec:
@@ -636,6 +713,10 @@ class App(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # A floating overlay, not part of `root`'s layout - it positions
+        # itself against `central`'s current size each time it is shown.
+        self.toast = widgets.Toast(central)
 
         self.banner = self._build_banner(central)
         root.addWidget(self.banner)
@@ -680,10 +761,27 @@ class App(QMainWindow):
 
         self.drawer = Drawer(column)
         self.drawer.setFixedHeight(self.drawer_height)
+        self.drawer.on_copy = self._show_toast
         col.addWidget(self.drawer)
 
         col.addWidget(self._build_statusbar(column))
         body.addWidget(column, 1)
+
+    def _build_shortcuts(self):
+        """A handful of window-wide shortcuts for the actions used most.
+
+        F5 mirrors the "Rescan device" button; Ctrl+1..Ctrl+9 mirror the
+        rail, generated from navigation.RAIL_GROUPS rather than hard-coded
+        so a sixth group would not silently go unreachable from the
+        keyboard. Bound to the window itself (not a menu action), which is
+        why the rail buttons' tooltips are what tell you these exist.
+        """
+        QShortcut(QKeySequence("F5"), self, activated=self._rescan)
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
+            if index > 9:
+                break
+            QShortcut(QKeySequence("Ctrl+{}".format(index)), self,
+                     activated=lambda key=group["key"]: self._select_rail(key))
 
     def _build_banner(self, parent):
         bar = QWidget(parent)
@@ -737,10 +835,13 @@ class App(QMainWindow):
         box.setSpacing(theme.SPACE[1])
         box.setAlignment(Qt.AlignHCenter)
         self.rail_buttons = {}
-        for group in navigation.RAIL_GROUPS:
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
             button = widgets.RailButton(group, rail)
             button.clicked.connect(
                 lambda _=False, key=group["key"]: self._select_rail(key))
+            if index <= 9:
+                button.setToolTip(
+                    "{} (Ctrl+{})".format(group["label"], index))
             box.addWidget(button, 0, Qt.AlignHCenter)
             self.rail_buttons[group["key"]] = button
         box.addStretch(1)
@@ -779,6 +880,12 @@ class App(QMainWindow):
         self.segment.chosen.connect(self._set_appearance)
         self.segment.set_choices_enabled(self.compositing)
         footer_box.addWidget(self.segment)
+        footer_box.addSpacing(theme.SPACE[2])
+        footer_box.addWidget(label("Temperature", "caption", footer))
+        self.unit_segment = widgets.Segmented(appstate.TEMP_UNITS, footer)
+        self.unit_segment.set_value(self.temp_unit)
+        self.unit_segment.chosen.connect(self._set_temp_unit)
+        footer_box.addWidget(self.unit_segment)
         box.addWidget(footer)
         self.pane = pane
         return pane
@@ -790,6 +897,8 @@ class App(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(12, 0, 12, 0)
         row.setSpacing(theme.SPACE[6])
+        self.elevation_dot = widgets.StatusDot(bar)
+        row.addWidget(self.elevation_dot)
         self.status_elevation = label("", "status", bar)
         self.status_binary = label("", "status", bar)
         self.status_modules = label("", "status", bar)
@@ -803,6 +912,12 @@ class App(QMainWindow):
         self._refresh_statusbar()
         return bar
 
+    # elevation -> the dot's colour: full elevation is good, pkexec asks a
+    # prompt per command (or several, on a multi-step tool) so it is a
+    # middle ground, and unelevated on Linux means most buttons will fail.
+    ELEVATION_DOT = {"Elevated": "ok", "pkexec": "warn",
+                     "Not elevated": "danger.border"}
+
     def _refresh_statusbar(self):
         if is_root():
             elevation = "Elevated"
@@ -811,6 +926,7 @@ class App(QMainWindow):
         else:
             elevation = "Not elevated"
         self.status_elevation.setText(elevation)
+        self.elevation_dot.set_state(self.ELEVATION_DOT[elevation])
         name = os.path.basename(self.binary) or "framework_tool"
         self.status_binary.setText(
             "{} {}".format(name, self.tool_version).strip())
@@ -895,6 +1011,15 @@ class App(QMainWindow):
         self._set_appearance(theme.OPAQUE if self.appearance == theme.ACRYLIC
                              else theme.ACRYLIC)
 
+    def _set_temp_unit(self, unit):
+        self.temp_unit = unit
+        self.settings["temp_unit"] = unit
+        appstate.save(self.settings)
+        # Re-render from what is already in self.readings - no command
+        # runs to change units, the same _apply_readings({}) idiom
+        # _build_pages() uses to redraw after a rebuild.
+        self._apply_readings({})
+
     def _resize_drawer(self, height):
         self.drawer_height = appstate.clamp_drawer(height)
         self.drawer.setFixedHeight(self.drawer_height)
@@ -907,6 +1032,20 @@ class App(QMainWindow):
         self.pane.setVisible(not collapsed)
         self.combo_wrap.setVisible(collapsed)
         self.section_combo.setVisible(collapsed)
+        if not self.toast.isHidden():
+            self.toast.reposition()
+
+    def closeEvent(self, event):
+        # Flipped before anything is torn down, so a daemon thread's next
+        # report through _emit (Rescan, a Diagnostics tool, a Settings
+        # write, the updater - anything started via run_tool or _rescan)
+        # sees it and stays quiet instead of emitting into a window Qt is
+        # already destroying. It cannot stop the thread itself - closing
+        # the window does not cancel it - but it stops that thread's next
+        # signal from being the reason a background exception lands on
+        # someone else's stderr.
+        self._closing = True
+        super().closeEvent(event)
 
     # ================= navigation =================
 
@@ -922,6 +1061,8 @@ class App(QMainWindow):
         if section not in self.pages:
             section = navigation.SECTIONS[0]
         self.section = section
+        self.settings["last_section"] = section
+        appstate.save(self.settings)
         group = navigation.group_for_section(section)
         self.rail_key = group["key"]
         for key, button in self.rail_buttons.items():
@@ -1036,6 +1177,13 @@ class App(QMainWindow):
             "ok" if self.caps.get("detected") else "muted", parent)
         title_row.addWidget(self.detected_badge)
         title_row.addStretch(1)
+        summary = QPushButton("Copy summary", parent)
+        summary.setProperty("role", "compact")
+        summary.setToolTip(
+            "Copy board/CPU/firmware and the current readings, for a bug "
+            "report")
+        summary.clicked.connect(self._copy_device_summary)
+        title_row.addWidget(summary)
         rescan = QPushButton("Rescan device", parent)
         rescan.clicked.connect(self._rescan)
         title_row.addWidget(rescan)
@@ -1046,6 +1194,8 @@ class App(QMainWindow):
         # The sub-line is trimmed to fit; the untrimmed strings live here.
         self.device_sub.setToolTip(self._device_detail())
         right.addWidget(self.device_sub)
+        self.scanned_label = label(self._scanned_text(), "caption", parent)
+        right.addWidget(self.scanned_label)
         right.addSpacing(theme.SPACE[4])
 
         grid = QGridLayout()
@@ -1075,21 +1225,35 @@ class App(QMainWindow):
         self.bay_source = label("port state, in CLI port order", "caption",
                                 panel)
         header.addWidget(self.bay_source)
+        save_diagram = QPushButton("Save diagram…", panel)
+        save_diagram.setProperty("role", "compact")
+        save_diagram.setToolTip(
+            "Save the chassis diagram as a PNG, for a support request")
+        save_diagram.clicked.connect(self._save_chassis_image)
+        header.addWidget(save_diagram)
         panel.body.addLayout(header)
 
         bays = QHBoxLayout()
         bays.setSpacing(theme.SPACE[6])
+        overview_chassis = device_images.chassis_for(self.caps.get("model", ""))
         self.chassis = widgets.ChassisDiagram(panel)
         # Shape it from the detected model now, not only when readings
         # arrive: the sensor read needs elevation and may never happen, and
         # until it did a Laptop 16 was drawn with the default chassis.
-        self.chassis.set_chassis(
-            device_images.chassis_for(self.caps.get("model", "")))
+        self.chassis.set_chassis(overview_chassis)
         bays.addWidget(self.chassis, 0, Qt.AlignTop)
         module_grid = QGridLayout()
         module_grid.setSpacing(theme.SPACE[3])
         self.module_rows = []
-        for index in range(4):
+        self.module_edit_buttons = []
+        # One row per bay the detected chassis actually has - this used to
+        # be a hardcoded range(4), which on a Laptop 16 (6 bays) silently
+        # dropped two bays from both this list and the diagram's own state
+        # colouring (states is built from the same loop, one entry per
+        # row), so two real bays always drew as empty regardless of what
+        # they actually reported.
+        bay_count = overview_chassis.get("bays", 4)
+        for index in range(bay_count):
             row_frame = QFrame(panel)
             row_frame.setObjectName("inset")
             row = QHBoxLayout(row_frame)
@@ -1104,13 +1268,31 @@ class App(QMainWindow):
             text.addWidget(name)
             text.addWidget(detail)
             row.addLayout(text, 1)
-            # Column = side (0 left, 1 right), row = position (0 back, 1
-            # front) — `_fill_bays` reorders `ports` into that same
-            # [LeftBack, LeftFront, RightBack, RightFront] sequence before
-            # this grid is painted, so a bay's row and the chassis
-            # diagram's marker for it land in the same physical spot.
+            # The CLI cannot identify a passive USB-C/USB-A card at all
+            # (see PASSIVE_CARDS_NOTE) - this is the only way this app can
+            # ever say what is actually in a bay, and it is purely local:
+            # nothing here is sent anywhere, unlike everything else this
+            # button's row shows.
+            edit_label = QPushButton("Label…", row_frame)
+            edit_label.setProperty("role", "compact")
+            edit_label.setToolTip(
+                "Set a note for this bay - the CLI cannot identify a "
+                "passive USB-C/USB-A card")
+            edit_label.clicked.connect(
+                lambda _=False, i=index: self._edit_bay_label(i))
+            row.addWidget(edit_label, 0, Qt.AlignVCenter)
+            # Two columns, as many rows as the bay count needs. On a 4-bay
+            # "sides" chassis this is column = side (0 left, 1 right), row
+            # = position (0 back, 1 front) — `_fill_bays` reorders `ports`
+            # into that same [LeftBack, LeftFront, RightBack, RightFront]
+            # sequence before this grid is painted, so a bay's row and the
+            # chassis diagram's marker for it land in the same physical
+            # spot. A 6-bay chassis has no such hardware-verified mapping
+            # (see `_ordered_by_bay`'s docstring) and is left in CLI order,
+            # same as the diagram's own fallback for it.
             module_grid.addWidget(row_frame, index % 2, index // 2)
             self.module_rows.append((icon, name, detail))
+            self.module_edit_buttons.append(edit_label)
         bays.addLayout(module_grid, 1)
         panel.body.addLayout(bays)
         self.cards_line = label("", "caption", panel)
@@ -1148,6 +1330,16 @@ class App(QMainWindow):
                     name, short_firmware(self.firmware[key])))
         return " · ".join(parts) or "No firmware detail read yet."
 
+    def _scanned_text(self):
+        """When `--versions` last answered, for the caption under the
+        sub-line. The app never re-reads the device on its own — there is no
+        background timer, only "Rescan device" — so without this a reading
+        from ten minutes ago looks exactly like one from just now.
+        """
+        if self._last_scan_at is None:
+            return "Not yet scanned this session"
+        return "Last scanned " + self._last_scan_at.strftime("%H:%M:%S")
+
     def _device_detail(self):
         """Everything the sub-line trimmed, for its tooltip."""
         rows = [("Board", self.caps.get("model", "")),
@@ -1157,6 +1349,29 @@ class App(QMainWindow):
                 ("framework_tool", self.tool_version)]
         return "\n".join("{}: {}".format(name, value)
                          for name, value in rows if value)
+
+    def _device_summary_text(self):
+        """Everything _device_detail knows, plus the six stat cards - the
+        paste someone reporting a bug would otherwise have to retype by
+        hand off the screen."""
+        lines = [self._device_detail()]
+        if getattr(self, "stat_cards", None):
+            lines.append("")
+            lines.extend("{}: {}".format(card.name.text(), card.value.text())
+                         for card in self.stat_cards.values())
+        return "\n".join(lines)
+
+    def _copy_device_summary(self):
+        self._copy_with_toast(self._device_summary_text())
+
+    def _save_chassis_image(self):
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save chassis diagram", "chassis.png", "PNG images (*.png)")
+        if not path:
+            return
+        if not self.chassis.grab().save(path, "PNG"):
+            self._warn("Could not save",
+                      "The image could not be written to {}.".format(path))
 
     def _has_gpu_module(self):
         """True when the expansion bay reported a Graphics Module.
@@ -1181,6 +1396,21 @@ class App(QMainWindow):
             box, parent, "Diagnostics",
             note="Multi-step tools issue many commands — run elevated to "
                  "avoid repeated prompts.")
+        run_all_row = QHBoxLayout()
+        run_all_row.setSpacing(theme.SPACE[4])
+        self.run_all_btn = QPushButton("Run all safe diagnostics", parent)
+        self.run_all_btn.setProperty("role", "accent")
+        self.run_all_btn.clicked.connect(self._run_all_safe_diagnostics)
+        run_all_row.addWidget(self.run_all_btn)
+        run_all_row.addWidget(label(
+            "Every diagnostic below in sequence, skipping any marked "
+            "danger.", "caption", parent))
+        run_all_row.addStretch(1)
+        box.addLayout(run_all_row)
+        self.report_row = QHBoxLayout()
+        self.report_row.setSpacing(theme.SPACE[3])
+        box.addLayout(self.report_row)
+        self._refresh_report_row(parent)
         grid = QGridLayout()
         grid.setHorizontalSpacing(theme.SPACE[7])
         grid.setVerticalSpacing(theme.SPACE[3])
@@ -1230,6 +1460,28 @@ class App(QMainWindow):
         self.tool_detail = ToolDetail(self._request_cancel, parent)
         self.tool_detail.setVisible(False)
         box.addWidget(self.tool_detail)
+
+    def _refresh_report_row(self, parent):
+        while self.report_row.count():
+            item = self.report_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self._last_report_path:
+            return
+        self.report_row.addWidget(widgets.Badge(
+            "Last report: " + self._last_report_path, "ok", parent,
+            elide=theme.BADGE_PATH_WIDTH))
+        copy_btn = QPushButton("Copy path", parent)
+        copy_btn.setProperty("role", "compact")
+        copy_btn.clicked.connect(
+            lambda _=False: self._copy_with_toast(self._last_report_path))
+        self.report_row.addWidget(copy_btn)
+        self.report_row.addStretch(1)
+
+    def _show_report_path(self, path):
+        self._last_report_path = path
+        if hasattr(self, "report_row"):
+            self._refresh_report_row(self.pages.get("tools"))
 
     def _tool_param_editor(self, tool, spec, parent):
         """A compact spin box for one overridable tool parameter.
@@ -1360,6 +1612,14 @@ class App(QMainWindow):
         panel.body.addWidget(self.port_empty)
         box.addWidget(panel)
 
+        # Empty until a query has actually run - same reasoning as the
+        # Overview's bay_source caption this mirrors: which command
+        # answered matters, because an EC that only supports the fallback
+        # is not obvious from the table alone.
+        self.ports_source_note = label("", "caption", parent)
+        self.ports_source_note.setWordWrap(True)
+        box.addWidget(self.ports_source_note)
+
         buttons = QGridLayout()
         buttons.setSpacing(theme.SPACE[3])
         queries = navigation.port_queries_for(self.caps)
@@ -1403,6 +1663,15 @@ class App(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         self.port_empty.setVisible(not ports)
+        source = self.readings.get("ports_source")
+        if source and hasattr(self, "ports_source_note"):
+            self.ports_source_note.setText(
+                "Read from {}{}.".format(
+                    source,
+                    " — this EC does not implement --pdports"
+                    if source == "--pdports-chromebook" else ""))
+        elif hasattr(self, "ports_source_note"):
+            self.ports_source_note.setText("")
         for index, port in enumerate(ports):
             watts = port_watts(port)
             # Neither port command can see the card in the bay, only the
@@ -1464,6 +1733,23 @@ class App(QMainWindow):
             box, parent, "Settings",
             "Only the controls this mainboard supports are shown. Detection "
             "failing shows everything rather than guessing.")
+        backup_row = QHBoxLayout()
+        backup_row.setSpacing(theme.SPACE[3])
+        export_btn = QPushButton("Export settings…", parent)
+        export_btn.setProperty("role", "compact")
+        export_btn.setToolTip(
+            "Save every row's current field value to a file")
+        export_btn.clicked.connect(self._export_settings)
+        backup_row.addWidget(export_btn)
+        import_btn = QPushButton("Import settings…", parent)
+        import_btn.setProperty("role", "compact")
+        import_btn.setToolTip(
+            "Fill rows from a file - nothing is sent to the device until "
+            "you press each row's own Set")
+        import_btn.clicked.connect(self._import_settings)
+        backup_row.addWidget(import_btn)
+        backup_row.addStretch(1)
+        box.addLayout(backup_row)
         self._preset_panel(box, parent)
         panel = widgets.Panel(parent)
         # The rows carry their own vertical padding, so the panel adds none:
@@ -1522,16 +1808,20 @@ class App(QMainWindow):
         box.addWidget(panel)
 
     def _apply_preset(self, preset):
-        """Write a preset's values, and show them in the rows they landed in."""
-        # Same reason as _start_tool: fill the editors only once there is
-        # going to be a command, or a click during a running tool would show
-        # values that were never written.
+        """Run a preset's commands; the rows fill from what tool_preset
+        confirms actually landed, not from the values requested.
+
+        This used to paint both rows immediately, before the command that
+        was supposed to set them had even run — the same optimistic write
+        every other setting-writing path here (_get_setting_worker,
+        _auto_setting_worker) deliberately avoids, because pkexec can be
+        cancelled and a device can refuse a value. A cancelled or refused
+        preset left the rows claiming a limit the hardware never took.
+        """
         if self._busy:
             self.set_status("Busy — wait or cancel the running tool.")
             return
         values = preset["sets"]
-        for key, value in values.items():
-            self._on_fill(key, value)
         limit = values.get("charge_limit", "80")
         rate = values.get("charge_rate", "1")
         self.run_tool(lambda: self.tool_preset(limit, rate))
@@ -1620,7 +1910,7 @@ class App(QMainWindow):
             # this app has no way to predict.
             self._get_setting_worker(row, list(row["get"]))
         elif row["kind"] == "choice":
-            self.sig_fill.emit(row["key"], "auto")
+            self._emit(self.sig_fill, row["key"], "auto")
 
     def _editor_value(self, key):
         editor = self.settings_widgets.get(key)
@@ -1651,7 +1941,7 @@ class App(QMainWindow):
                                               parse_setting_value)
             value = reader(out)
             if value:
-                self.sig_fill.emit(row["key"], value)
+                self._emit(self.sig_fill, row["key"], value)
 
     def _on_fill(self, key, value):
         editor = self.settings_widgets.get(key)
@@ -1662,10 +1952,58 @@ class App(QMainWindow):
         elif editor is not None:
             editor.setText(value)
 
+    def _export_settings(self):
+        """Every row's current field value to a file — a local backup, not
+        a read of the device. Useful before trying something risky, or for
+        carrying values between two machines of the same model."""
+        data = {key: self._editor_value(key)
+               for key in self.settings_widgets}
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export settings", "framework-gui-settings.json",
+            "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, sort_keys=True)
+        except OSError as e:
+            self._warn("Could not export", str(e))
+
+    def _import_settings(self):
+        """Fill rows from a file. Never applies anything by itself — a
+        row a device does not have (a different model, or wrong file) is
+        skipped rather than guessed at, and every row still needs its own
+        Set before the device sees any of it, same as typing the value in
+        by hand."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import settings", "", "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:
+            self._warn("Could not import", str(e))
+            return
+        if not isinstance(data, dict):
+            self._warn("Could not import", "Not a settings file.")
+            return
+        filled = 0
+        for key, value in data.items():
+            if key in self.settings_widgets and isinstance(value, str):
+                self._on_fill(key, value)
+                filled += 1
+        self.set_status(
+            "Imported {} field(s) — review, then press each row's own Set "
+            "to apply.".format(filled) if filled
+            else "Nothing in that file matched a row on this device.")
+
     def _set_setting(self, row):
         value = self._editor_value(row["key"])
         if not value:
             self._warn("Nothing to set", "Enter a value first.")
+            return
+        if row["kind"] == "number" and not self._validate_number_row(row, value):
             return
         args = list(row["set"]) + [value]
         if row["danger"] and not self._confirm_command(
@@ -1676,8 +2014,45 @@ class App(QMainWindow):
             return
         self.run(args)
 
+    def _validate_number_row(self, row, value):
+        """A number row's typed value, checked against its own `min`/`max`
+        before Set ever builds a command — the same instinct as the RGB
+        field's hex check, applied to a text field that is otherwise
+        trusted verbatim. Bounds come from `navigation.SETTINGS_ROWS`, not
+        invented here: most are the percentage the row's own note already
+        documents, and a row with no published bound (charge_rate's upper
+        end) simply has none to check.
+        """
+        try:
+            number = float(value)
+        except ValueError:
+            self._warn("Invalid value",
+                      "\"{}\" is not a number.".format(value))
+            return False
+        unit = row.get("unit", "")
+        low, high = row.get("min"), row.get("max")
+        if low is not None and number < low:
+            self._warn("Out of range", "{} must be at least {}{}.".format(
+                row["label"], low, unit))
+            return False
+        if high is not None and number > high:
+            self._warn("Out of range", "{} must be at most {}{}.".format(
+                row["label"], high, unit))
+            return False
+        return True
+
+    # A user-typed colour, not CLI output, so this lives here rather than
+    # among parsers.py's output-parsing regexes.
+    RE_HEX_COLOUR = re.compile(r"^[0-9A-Fa-f]{6}$")
+
     def _set_rgb_all(self):
-        hexval = self._editor_value("rgbkbd").lstrip("#") or "FF0000"
+        hexval = self._editor_value("rgbkbd").lstrip("#").strip() or "FF0000"
+        if not self.RE_HEX_COLOUR.match(hexval):
+            self._warn(
+                "Invalid colour",
+                "\"{}\" is not a 6-digit hex colour, e.g. FF0000."
+                .format(hexval))
+            return
         self.run(["--rgbkbd", "0"] + ["0x{}".format(hexval)] * 8)
 
     def _clear_rgb_all(self):
@@ -2082,6 +2457,11 @@ class App(QMainWindow):
         this_button.clicked.connect(
             lambda _=False, u=entry["url"]: self._open_url(u))
         this_row.addWidget(this_button)
+        this_copy = QPushButton("Copy link", panel)
+        this_copy.setProperty("role", "compact")
+        this_copy.clicked.connect(
+            lambda _=False, u=entry["url"]: self._copy_with_toast(u))
+        this_row.addWidget(this_copy)
         explanation = label(
             "Opens Framework's downloads list for this build."
             if entry["exact"] else
@@ -2107,6 +2487,10 @@ class App(QMainWindow):
         open_button = QPushButton("Open downloads list", panel)
         open_button.clicked.connect(self._open_selected_driver_page)
         every_row.addWidget(open_button)
+        copy_every = QPushButton("Copy link", panel)
+        copy_every.setProperty("role", "compact")
+        copy_every.clicked.connect(self._copy_selected_driver_link)
+        every_row.addWidget(copy_every)
         every_row.addStretch(1)
         panel.body.addLayout(every_row)
         panel.body.addWidget(rule(panel))
@@ -2135,6 +2519,12 @@ class App(QMainWindow):
             webbrowser.open(url)
             self.set_status("Opened {}".format(url))
 
+    def _copy_selected_driver_link(self):
+        url = self.driver_choice.currentData()
+        if url:
+            self._copy_with_toast(url)
+            self.set_status("Copied link to clipboard.")
+
     def _open_url(self, url):
         webbrowser.open(url)
         self.set_status("Opened {}".format(url))
@@ -2147,6 +2537,7 @@ class App(QMainWindow):
             "This app only ever runs other programs. Nothing is installed "
             "without you clicking Install and confirming the exact command "
             "first.")
+        self._build_update_panel(box, parent)
         os_name = "windows" if IS_WINDOWS else "linux"
         manager = deps.linux_manager(shutil.which) if IS_LINUX else None
         for dep in deps.relevant(os_name, self.cpu.get("vendor")):
@@ -2181,6 +2572,151 @@ class App(QMainWindow):
         recheck = QPushButton("Re-check what is installed", parent)
         recheck.clicked.connect(self._rescan)
         box.addWidget(recheck, 0, Qt.AlignLeft)
+
+    # ---- self-update: check and download, never install or run ----
+    #
+    # Same rule as every other Setup entry: nothing runs without a click and
+    # a confirm dialog naming exactly what will happen. The one thing this
+    # app has never done — execute a downloaded installer on the user's
+    # behalf, see CLAUDE.md's "Deliberately out of scope" — still does not
+    # happen here: a successful download ends at a path and a Copy button,
+    # not a launch.
+
+    def _build_update_panel(self, box, parent):
+        panel = widgets.Panel(parent)
+        self.update_panel = panel
+        header = QHBoxLayout()
+        header.setSpacing(theme.SPACE[4])
+        header.addWidget(label("Framework System GUI", "name", panel))
+        header.addWidget(widgets.Badge("v" + __version__, "muted", panel))
+        header.addStretch(1)
+        check = QPushButton("Check for updates", panel)
+        check.clicked.connect(self._check_for_update)
+        header.addWidget(check)
+        panel.body.addLayout(header)
+        self.update_status = label(self._update_status_text(), "caption",
+                                   panel)
+        self.update_status.setWordWrap(True)
+        panel.body.addWidget(self.update_status)
+        self.update_actions = QHBoxLayout()
+        self.update_actions.setSpacing(theme.SPACE[3])
+        panel.body.addLayout(self.update_actions)
+        box.addWidget(panel)
+        self._rebuild_update_actions()
+
+    def _update_status_text(self):
+        result = self._update_result
+        if result is None:
+            return ("Checks GitHub for a newer release of this app. "
+                    "Downloads only — nothing here installs or runs "
+                    "anything on its own.")
+        if result["latest"] is None:
+            return "Could not read a version number from the latest release."
+        if result["newer"]:
+            return "v{} is available (you have v{}).".format(
+                result["latest"], result["current"])
+        return "You're on the latest release (v{}).".format(result["current"])
+
+    def _check_for_update(self):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        self.run_tool(self._update_check_worker)
+
+    def _update_check_worker(self):
+        os_name = "windows" if IS_WINDOWS else "linux"
+        url = deps.github_latest_api(updater.REPO)
+        self._log("updater", "=== Checking for updates ===\n$ GET {}\n"
+                  .format(url), "command")
+        try:
+            body = deps.fetch_text(url, timeout=20)
+            release = json.loads(body)
+        except Exception as e:  # noqa: BLE001
+            self._log("updater", "Could not check for updates: {}\n"
+                      .format(e), "warn")
+            return
+        result = updater.describe(release, os_name, __version__)
+        self._log("updater", "Latest release: v{}\n"
+                  .format(result["latest"] or "?"))
+        self._emit(self.sig_update_checked, result)
+
+    def _apply_update_check(self, result):
+        self._update_result = result
+        self._update_path = None
+        self.update_status.setText(self._update_status_text())
+        self._rebuild_update_actions()
+
+    def _rebuild_update_actions(self):
+        while self.update_actions.count():
+            item = self.update_actions.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        result = self._update_result
+        if not result:
+            return
+        if result.get("html_url"):
+            notes = QPushButton("Release notes", self.update_panel)
+            notes.clicked.connect(
+                lambda _=False, u=result["html_url"]: self._open_url(u))
+            self.update_actions.addWidget(notes)
+        if result["newer"] and self._update_path is None:
+            if result.get("asset_url"):
+                download = QPushButton(
+                    "Download v{}".format(result["latest"]),
+                    self.update_panel)
+                download.setProperty("role", "accent")
+                download.clicked.connect(
+                    lambda _=False, r=result: self._start_update_download(r))
+                self.update_actions.addWidget(download)
+            else:
+                self.update_actions.addWidget(label(
+                    "No {} in that release yet.".format(
+                        result.get("asset_name") or "matching download"),
+                    "caption", self.update_panel))
+        if self._update_path:
+            badge = widgets.Badge(self._update_path, "ok", self.update_panel,
+                                  elide=theme.BADGE_PATH_WIDTH)
+            self.update_actions.addWidget(badge)
+            copy = QPushButton("Copy path", self.update_panel)
+            copy.clicked.connect(
+                lambda _=False, p=self._update_path: self._copy_with_toast(p))
+            self.update_actions.addWidget(copy)
+            note = ("Run it to install the update."
+                    if IS_WINDOWS else
+                    "Install it yourself: flatpak install --user "
+                    + self._update_path)
+            self.update_actions.addWidget(label(note, "caption",
+                                                self.update_panel))
+
+    def _start_update_download(self, result):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        if not self._ask(
+                "Download update",
+                "This downloads {} from GitHub into {}.\n\n"
+                "It will not be run or installed automatically — you do "
+                "that yourself once it has finished.\n\nProceed?".format(
+                    result["asset_name"], updater.downloads_dir())):
+            return
+        self.run_tool(lambda: self._download_update(result))
+
+    def _download_update(self, result):
+        dest = updater.downloads_dir()
+        self._log("updater", "=== Downloading {} ===\n"
+                  .format(result["asset_name"]), "command")
+        try:
+            path = deps.download_file(result["asset_url"], dest,
+                                      progress=self._download_progress)
+        except Exception as e:  # noqa: BLE001
+            self._log("updater", "Download failed: {}\n".format(e), "warn")
+            return
+        self._log("updater", "Saved to {}\n".format(path), "ok")
+        self._emit(self.sig_update_downloaded, path)
+
+    def _show_update_path(self, path):
+        self._update_path = path
+        self._rebuild_update_actions()
 
     def _install_dep(self, dep, plan):
         note = "\n\nNote: {}".format(plan["note"]) if plan.get("note") else ""
@@ -2319,6 +2855,18 @@ class App(QMainWindow):
             recent.addWidget(chip)
         recent.addStretch(1)
         panel.body.addLayout(recent)
+
+        # Hidden until something has actually been run - navigation.py's
+        # RECENT_SUGGESTIONS above are curated defaults, this is what this
+        # user actually typed, and an empty "History" row before the first
+        # command would say nothing useful.
+        self.history_wrap = QWidget(panel)
+        self.history_layout = QHBoxLayout(self.history_wrap)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(theme.SPACE[3])
+        panel.body.addWidget(self.history_wrap)
+        self._refresh_history_row()
+
         panel.body.addWidget(rule(panel))
 
         bottom = QHBoxLayout()
@@ -2348,6 +2896,35 @@ class App(QMainWindow):
         binary_panel.body.addLayout(binary_row)
         box.addWidget(binary_panel)
 
+    HISTORY_LIMIT = 8
+
+    def _remember_custom_command(self, text):
+        if not text:
+            return
+        if text in self._custom_history:
+            self._custom_history.remove(text)
+        self._custom_history.insert(0, text)
+        del self._custom_history[self.HISTORY_LIMIT:]
+        self._refresh_history_row()
+
+    def _refresh_history_row(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.history_wrap.setVisible(bool(self._custom_history))
+        if not self._custom_history:
+            return
+        self.history_layout.addWidget(
+            label("History", "caption", self.history_wrap))
+        for entry in self._custom_history:
+            chip = QPushButton(entry, self.history_wrap)
+            chip.setProperty("role", "link")
+            chip.clicked.connect(
+                lambda _=False, s=entry: self.custom.setText(s))
+            self.history_layout.addWidget(chip)
+        self.history_layout.addStretch(1)
+
     def _set_binary(self, text):
         self.binary = text.strip() or "framework_tool"
         self._refresh_statusbar()
@@ -2376,7 +2953,7 @@ class App(QMainWindow):
             "firmware": firmware,
             "tool_version": parse_tool_version(version_text),
         }
-        self.sig_detected.emit(caps, detect_cpu(), extras)
+        self._emit(self.sig_detected, caps, detect_cpu(), extras)
 
     def _apply_detection(self, caps, cpu, extras):
         self.caps = caps
@@ -2389,6 +2966,7 @@ class App(QMainWindow):
         else:
             self.set_status(
                 "Could not identify the device model — showing all controls.")
+        self._last_scan_at = datetime.datetime.now()
         self._build_pages()
         self._refresh_statusbar()
         # Sensor readings need three more commands. Running them
@@ -2496,7 +3074,7 @@ class App(QMainWindow):
         self._read_cards(readings)
         if self.caps.get("has_expansion_bay"):
             self._read_into(readings, "expansion_bay", ["--expansion-bay"])
-        self.sig_readings.emit(readings)
+        self._emit(self.sig_readings, readings)
 
     def _apply_readings(self, readings):
         self.readings.update(readings)
@@ -2538,8 +3116,19 @@ class App(QMainWindow):
         self.stat_cards["cycles"].set_value(
             cycles.group(1) if cycles else "—")
 
-    @staticmethod
-    def _cpu_temp(temps):
+    def _format_temp(self, celsius):
+        """A Celsius reading in whichever unit the Temperature toggle picked.
+
+        Display-only, and only for read-only readings (this card, and the
+        Fans pane's sensor rows) — anything that is itself a *setting* in
+        Celsius, like the CPU limits pane's Tctl, stays in Celsius so a
+        typed value is never silently sent to a command in the wrong unit.
+        """
+        if self.temp_unit == "F":
+            return "{:.0f} F".format(celsius_to_fahrenheit(celsius))
+        return "{} C".format(celsius)
+
+    def _cpu_temp(self, temps):
         """The package temperature from `--thermal`'s sensor list.
 
         Sensor names differ per board, so this prefers one that names the
@@ -2550,8 +3139,8 @@ class App(QMainWindow):
             return "—"
         for name, value in temps:
             if any(tag in name.lower() for tag in ("cpu", "apu", "tctl")):
-                return "{} C".format(value)
-        return "{} C".format(max(int(v) for _n, v in temps))
+                return self._format_temp(int(value))
+        return self._format_temp(max(int(v) for _n, v in temps))
 
     @staticmethod
     def _ac_summary(ac, power_text):
@@ -2579,13 +3168,31 @@ class App(QMainWindow):
         if not temps:
             return
         self.sensor_empty.setVisible(False)
+        values = {}
         for name, value in temps:
             if name not in self.sensor_rows:
                 row = widgets.SensorRow(name)
                 self.sensor_holder.addWidget(row)
                 self.sensor_rows[name] = row
             self.sensor_rows[name].set_reading(
-                "{} C".format(value), int(value) / TEMP_SCALE_C)
+                self._format_temp(int(value)), int(value) / TEMP_SCALE_C)
+            values[name] = int(value)
+        self._reorder_sensors(values)
+
+    def _reorder_sensors(self, values):
+        """Hottest sensor first.
+
+        --thermal's own order is neither sorted nor stable between boards,
+        and the one reading actually worth noticing should not be sitting
+        below however many others a board happens to report. Reorders the
+        existing rows in place (removeWidget, not takeAt+deleteLater) —
+        nothing is rebuilt, only repositioned.
+        """
+        ordered = sorted(self.sensor_rows, key=lambda name: -values.get(name, -1))
+        for name in ordered:
+            self.sensor_holder.removeWidget(self.sensor_rows[name])
+        for name in ordered:
+            self.sensor_holder.addWidget(self.sensor_rows[name])
 
     # The order `_fill_bays` arranges ports into before filling rows/the
     # diagram, matching the (row, column) scheme `module_grid` and
@@ -2622,7 +3229,15 @@ class App(QMainWindow):
         for index, slot in enumerate(slots):
             if slot is None and leftover:
                 slots[index] = leftover.pop(0)
-        return [port for port in slots if port is not None]
+        ordered = [port for port in slots if port is not None]
+        # A port that still doesn't fit once all four slots are taken (the
+        # CLI naming more ports than this chassis is believed to have)
+        # must not simply vanish - that would be exactly the silent data
+        # loss the fail-open rule elsewhere in this file exists to avoid.
+        # Appended in their own original order, same as the chassis layouts
+        # this reordering does not apply to at all.
+        ordered.extend(leftover)
+        return ordered
 
     def _fill_bays(self):
         """Paint the four bay rows from what the port commands reported.
@@ -2644,13 +3259,18 @@ class App(QMainWindow):
         # is a legend for these rows, so it has to be the right machine.
         self.chassis.set_chassis(chassis)
         ports = self._ordered_by_bay(self.readings.get("ports") or [], chassis)
+        board = self.caps.get("model", "")
         states = []
         for index, (icon, name, detail) in enumerate(self.module_rows):
             port = ports[index] if index < len(ports) else None
+            bay_key = ((port.get("name") if port and port.get("name")
+                       else None) or "Port {}".format(index + 1))
+            custom = appstate.bay_label(self.settings, board, bay_key)
             if port is None:
                 states.append("empty")
                 icon.set_module(module_icons.UNKNOWN, token="icon")
-                name.setText("Port {}".format(index + 1))
+                name.setText(custom or "Port {}".format(index + 1))
+                name.setToolTip(bay_key if custom else "")
                 detail.setText("not read")
                 continue
             role = (port.get("role") or "?").lower()
@@ -2663,8 +3283,13 @@ class App(QMainWindow):
                 state, token = "idle", "warn"
             states.append(state)
             icon.set_module(module_icons.UNKNOWN, token=token)
-            name.setText(port.get("name")
+            # A label a person typed themselves outranks the generic name -
+            # it is the only way this app can ever say what a passive
+            # USB-C/USB-A card actually is (see PASSIVE_CARDS_NOTE), so
+            # once someone has set one it is more useful than "Port 2".
+            name.setText(custom or port.get("name")
                          or "Port {}".format(port["port"]))
+            name.setToolTip(bay_key if custom else "")
             detail.setText("{} · {}".format(role, self._bay_power(port))
                            if attached else "nothing attached")
         self.chassis.set_states(states)
@@ -2678,6 +3303,38 @@ class App(QMainWindow):
                 "port state from {}, in CLI port order · the CLI cannot see "
                 "which card is fitted".format(source))
         self._fill_cards()
+
+    def _bay_key_for_index(self, index):
+        """The key a bay's custom label is stored under: its own CLI-given
+        name if it has one (stable across rescans on a board with named
+        ports), else a positional fallback. Matches the same logic
+        `_fill_bays` uses so a label set through the dialog is the same
+        label `_fill_bays` then looks up and shows.
+        """
+        chassis = device_images.chassis_for(self.caps.get("model", ""))
+        ports = self._ordered_by_bay(self.readings.get("ports") or [], chassis)
+        port = ports[index] if index < len(ports) else None
+        return ((port.get("name") if port and port.get("name") else None)
+               or "Port {}".format(index + 1))
+
+    def _edit_bay_label(self, index):
+        """Let a person say what is actually in a bay - purely local
+        metadata, never sent anywhere, and the only way this app can ever
+        name a passive USB-C/USB-A card (see PASSIVE_CARDS_NOTE).
+        """
+        board = self.caps.get("model", "")
+        bay_key = self._bay_key_for_index(index)
+        current = appstate.bay_label(self.settings, board, bay_key)
+        text, ok = QInputDialog.getText(
+            self, "Label this bay",
+            "A note only you see for this bay - the CLI cannot identify a "
+            "passive USB-C/USB-A card, e.g. \"My 1TB SSD\":",
+            text=current)
+        if not ok:
+            return
+        appstate.set_bay_label(self.settings, board, bay_key, text)
+        appstate.save(self.settings)
+        self._fill_bays()
 
     # Why three bays with cards in them can all read "nothing attached".
     PASSIVE_CARDS_NOTE = ("USB-C and USB-A cards are passive passthroughs — "
@@ -2822,6 +3479,7 @@ class App(QMainWindow):
         if "--console" in args and "follow" in args:
             self._warn("Blocked", "--console follow never exits; use 'recent'.")
             return
+        self._remember_custom_command(self.custom.text().strip())
         self.run(args)
 
     def run(self, args):
@@ -2838,8 +3496,8 @@ class App(QMainWindow):
         rc, text = self._exec(args)
         self._log("framework_tool", text.strip() + "\n",
                   "output" if rc == 0 else "warn")
-        self.sig_status.emit("Done (exit {})".format(rc))
-        self.sig_tool_done.emit()
+        self._emit(self.sig_status, "Done (exit {})".format(rc))
+        self._emit(self.sig_tool_done)
 
     # ---- tool (multi-step) plumbing ----
 
@@ -2925,7 +3583,7 @@ class App(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self._append("\nTool error: {}\n".format(e))
         finally:
-            self.sig_tool_done.emit()
+            self._emit(self.sig_tool_done)
 
     def _tool_done(self):
         self._busy = False
@@ -2940,10 +3598,86 @@ class App(QMainWindow):
                 frame.setProperty("running", "false")
                 widgets.restyle(frame)
             self._current_tool = None
+        if self._running_all:
+            self._running_all = False
+            for frame in self.tool_rows.values():
+                frame.setProperty("running", "false")
+                widgets.restyle(frame)
+            if hasattr(self, "run_all_btn"):
+                self.run_all_btn.setText("Run all safe diagnostics")
+                self.run_all_btn.clicked.disconnect()
+                self.run_all_btn.clicked.connect(
+                    self._run_all_safe_diagnostics)
 
     def _request_cancel(self):
         self._cancel = True
         self.set_status("Cancelling after current step…")
+
+    # ---- run every non-destructive diagnostic in sequence ----
+
+    def _run_all_safe_diagnostics(self):
+        if self._busy:
+            self.set_status("Busy — wait or cancel the running tool.")
+            return
+        tools = [t for t in navigation.tools_for(self.caps)
+                if not t.get("danger")]
+        if not tools:
+            return
+        if not self._ask(
+                "Run all safe diagnostics",
+                "Runs these {} diagnostics in sequence, each restoring its "
+                "own state when it finishes: {}.\n\nTools marked danger "
+                "are excluded — run those individually.\n\nProceed?".format(
+                    len(tools), ", ".join(t["label"] for t in tools))):
+            return
+        # Every tool's params are read off its own editor here, on the UI
+        # thread, and frozen into the plan - a worker thread must never
+        # touch a widget, the same rule _start_tool follows for one tool.
+        plan = [(tool, self.tool_params(tool)) for tool in tools]
+        self.tool_detail.setVisible(False)
+        self._running_all = True
+        self.run_all_btn.setText("Cancel run-all")
+        self.run_all_btn.clicked.disconnect()
+        self.run_all_btn.clicked.connect(self._request_cancel)
+        self.run_tool(lambda: self._run_all_worker(plan))
+
+    def _run_all_worker(self, plan):
+        total = len(plan)
+        for index, (tool, params) in enumerate(plan):
+            if self._cancel:
+                break
+            # Plain attribute writes, read back by _param() on this same
+            # worker thread as each tool runs - not a widget, so this is
+            # not the thing the no-touching-widgets rule is about.
+            self._tool_values = params
+            self._emit(self.sig_chain_step, (tool, index, total))
+            self._append("\n=== [{}/{}] {} ===\n".format(
+                index + 1, total, tool["label"]))
+            method = getattr(self, "tool_" + tool["key"], None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception as e:  # noqa: BLE001
+                self._append("\nTool error running {}: {}\n".format(
+                    tool["label"], e))
+        self._emit(self.sig_chain_step, None)
+        self._append("\n=== Run all safe diagnostics {} ===\n".format(
+            "cancelled" if self._cancel else "finished"))
+
+    def _on_chain_step(self, payload):
+        if payload is None:
+            for frame in self.tool_rows.values():
+                frame.setProperty("running", "false")
+                widgets.restyle(frame)
+            return
+        tool, index, total = payload
+        for key, frame in self.tool_rows.items():
+            frame.setProperty("running", "true" if key == tool["key"]
+                              else "false")
+            widgets.restyle(frame)
+        self.set_status("Running diagnostic {} of {}: {}".format(
+            index + 1, total, tool["label"]))
 
     def _sleep(self, seconds):
         """Interruptible sleep; returns False if cancelled."""
@@ -2956,25 +3690,54 @@ class App(QMainWindow):
 
     # ---- output ----
 
+    def _emit(self, signal, *args):
+        """Emit a worker-thread signal, unless the window is closing.
+
+        Every command runs on a daemon thread (run_tool/_rescan) that
+        outlives the window when it is closed mid-run, and that thread's
+        next report would otherwise emit into a QObject Qt has already
+        started tearing down. `_closing` (set by closeEvent) catches the
+        common case; the try/except is the backstop for a report that was
+        already in flight the instant closeEvent ran.
+        """
+        if self._closing:
+            return
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
+
     def _append(self, text):
         self._log("framework_tool", text)
 
     def _log(self, stream, text, kind="output"):
-        self.sig_log.emit(stream, text, kind)
+        self._emit(self.sig_log, stream, text, kind)
 
     def _on_log(self, stream, text, kind):
         self.drawer.append(stream, text, kind)
 
     def set_status(self, msg):
-        self.sig_status.emit(msg)
+        self._emit(self.sig_status, msg)
 
     def _on_status(self, msg):
         self.status_message.setText(msg)
 
+    def _show_toast(self, text):
+        """A brief on-screen confirmation, for the copy actions that
+        otherwise gave no sign anything had happened beyond a status-bar
+        line easy to miss. Called from the UI thread only — every site
+        that uses it is a button's own click handler, never a worker.
+        """
+        self.toast.show_message(text)
+
+    def _copy_with_toast(self, text):
+        QGuiApplication.clipboard().setText(text)
+        self._show_toast("Copied to clipboard")
+
     def _progress(self, index, step, total, name, value, fraction):
-        self.sig_progress.emit(
-            {"index": index, "step": step, "total": total, "name": name,
-             "value": value, "fraction": fraction})
+        self._emit(self.sig_progress,
+                   {"index": index, "step": step, "total": total,
+                    "name": name, "value": value, "fraction": fraction})
 
     def _on_progress(self, payload):
         self.tool_detail.update_step(
@@ -3241,7 +4004,7 @@ class App(QMainWindow):
             self._append("Neither port command named a USB-C port on this "
                          "board.\n")
             return
-        self.sig_readings.emit({"ports": ports})
+        self._emit(self.sig_readings, {"ports": ports})
         for p in ports:
             title = "Port {}{}".format(
                 p["port"], " ({})".format(p["name"]) if p.get("name") else "")
@@ -3361,6 +4124,7 @@ class App(QMainWindow):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.writelines(lines)
             self._append("\nSaved: {}\n".format(path))
+            self._emit(self.sig_report_saved, path)
         except OSError as e:
             self._append("\nCould not write file: {}\n".format(e))
 
@@ -3370,12 +4134,25 @@ class App(QMainWindow):
         rc, out = self._exec(["--charge-limit", str(limit)])
         self._append(out.strip() + "\n" if out.strip()
                      else "Charge limit → {}% (exit {})\n".format(limit, rc))
+        if rc == 0:
+            # Re-read rather than assume it stuck - a preset writes two
+            # rows instead of one, but that is not a reason to skip the
+            # confirm-before-fill rule every other row here follows.
+            vrc, vout = self._exec(["--charge-limit"])
+            if vout.strip():
+                self._append("Verify: " + vout.strip() + "\n")
+            if vrc == 0:
+                value = parse_charge_limit(vout)
+                if value:
+                    self._emit(self.sig_fill, "charge_limit", value)
         rc, out = self._exec(["--charge-rate-limit", rate])
         self._append(out.strip() + "\n" if out.strip()
                      else "Rate limit → {}C (exit {})\n".format(rate, rc))
-        rc, out = self._exec(["--charge-limit"])
-        if rc == 0 and out.strip():
-            self._append("Verify: " + out.strip() + "\n")
+        if rc == 0:
+            # framework_tool has no read for this row ("get": None) - the
+            # exit code is the best confirmation there is, the same limit
+            # _auto_setting_worker accepts for a row with no get.
+            self._emit(self.sig_fill, "charge_rate", rate)
 
 
 def load_app_icon():

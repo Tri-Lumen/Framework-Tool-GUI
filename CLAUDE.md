@@ -40,6 +40,22 @@ processes.** No services, timers, tray icons, or autostart entries on either
 OS. A subprocess is spawned only when the user clicks a button, and exits
 when that command finishes.
 
+Second hard requirement, same weight: **the app works fully offline.**
+Every framework_tool control — Overview, Diagnostics, Fans, Ports &
+modules, Settings, CPU limits — is a local subprocess call and needs no
+network under any circumstance. The **only** network-touching actions in
+the whole app are on the Setup pane, and every one of them is a button a
+person clicks, never something that runs on launch or blocks anything
+else from working: installing/reinstalling a helper tool (`deps.py`,
+Windows-only today) and "Check for updates" (`updater.py`). The Drivers
+pane is the one deliberate, narrower exception to even that: it *links* to
+Framework's downloads pages (no fetch — see `drivers.py`), and a person
+can ask it to pull a linked download down for them, but the pane itself,
+and the rest of the app, work with zero network reachability. Don't make
+any reading, parser, or gating decision depend on a network call — if a
+feature needs one, it has to be an explicit, separate button the way the
+two above are, never folded into something that already works offline.
+
 ## Quick orientation
 
 The app is the `frameworkgui` package; `framework_gui.py` at the repository
@@ -62,7 +78,9 @@ frameworkgui/
                         every gated pane (12 tools, 9 port queries, 9 settings
                         rows, 2 charge presets). Keys, not bound methods, so
                         it stays testable.
-  appstate.py          The two persisted UI choices (appearance, drawer height).
+  appstate.py          The persisted UI choices (appearance, drawer height,
+                        last-viewed section, temperature unit) and per-bay
+                        labels a person typed for their own expansion cards.
   backdrop.py          Compositing probe + the Windows 11 backdrop call.
   device_images.py     Board string → product photograph, and the chassis
                         dimensions/bay count the Overview drawing is scaled
@@ -80,6 +98,10 @@ frameworkgui/
                         powercfg. Builds commands, does no I/O of its own.
   deps.py              Helper-tool registry: detect, and build install plans.
   drivers.py           Framework download-page catalog. Links only, no I/O.
+  updater.py           Version comparison + release-asset lookup for the
+                        Setup pane's "Check for updates". Downloads only —
+                        see its docstring — using deps.py's fetch/download
+                        functions for the one HTTP call it makes.
                         (everything except app.py and widgets.py follows
                         parsers.py's rules: stdlib only, no toolkit import,
                         I/O injected as arguments)
@@ -252,7 +274,49 @@ failure mode to watch for.
   `framework_tool`, `ryzenadj`, `apt-get` — with its output after it. Lines
   are inserted with a character format rather than as HTML so the CLI's text
   is never reformatted, which the design is explicit about. Height is
-  dragged with the grabber, clamped to 70–460px, and persisted.
+  dragged with the grabber, clamped to 70–460px, and persisted. "copy" and
+  "save" sit beside wrap/clear so a tab's raw output can go into a bug
+  report — pasted, or kept as a file — without a mouse-drag selection
+  across a scrolled terminal. The Overview's "Copy summary" button
+  (`_device_summary_text`) is the same instinct applied to the board/CPU/
+  firmware detail plus the six stat cards, and "Save diagram…" next to the
+  Expansion bays panel saves the chassis drawing itself as a PNG.
+
+- **There is no background refresh, so the app says when it last looked.**
+  The six-card grid and the bay panel only change on "Rescan device" (or the
+  launch scan) — never on a timer, per the no-background-processes rule — so
+  a five-minute-old reading looks identical to a fresh one with nothing to
+  tell them apart. `App._last_scan_at` is stamped right before `_build_pages()`
+  in `_apply_detection` and shown as a caption under the sub-line
+  (`App._scanned_text`). It is a static timestamp, not a ticking "n minutes
+  ago" — that would need its own timer, which is the one thing this project
+  has never allowed itself.
+
+- **The last section you were on is where you land next time.** The rail
+  used to always open on Overview, which is a longer path back to whatever
+  pane you actually spend your time in — Settings, Fans, the console. Every
+  section always exists in `self.pages` regardless of the detected model
+  (`tests/test_smoke_gui.TestGuiSmoke.test_every_section_is_built`), so a
+  stored section needs no gating-aware fallback: `appstate.py` validates it
+  against `navigation.SECTIONS` and `App._select_section` persists it on
+  every click, the same eager-write pattern the drawer-height drag already
+  used.
+
+- **F5 and Ctrl+1..Ctrl+9 are the keyboard equivalents of the Rescan button
+  and the rail**, wired in `App._build_shortcuts` and generated off
+  `navigation.RAIL_GROUPS` rather than hard-coded, so a sixth group would not
+  silently go unreachable from the keyboard. There is no menu bar to hang
+  them off, so the rail buttons' tooltips are the only place these are
+  written down — check there before adding another one.
+
+- **A style sheet suppresses Qt's own focus rectangle.** Once `theme.py`'s
+  sheet is in force, tabbing to a button or field (or landing on one via a
+  shortcut) drew no visible indication it was the one Enter would activate.
+  `QPushButton:focus`/`QLineEdit:focus`/`QComboBox:focus`/`QSpinBox:focus`
+  put a thin accent-coloured `outline` back — `outline`, not `border`, so
+  focusing a button never shifts its neighbours — and `QPushButton:pressed`
+  gets the same accent-rail fill the selected rail button uses, so pressing
+  one reads as an action rather than nothing happening until it releases.
 
 - **Overview readings cost three more elevated commands.** `--versions` is
   the launch scan, as it always was. The six stat cards and the bay panel
@@ -326,6 +390,36 @@ failure mode to watch for.
   command in the app echoes its output now; `_read_into` is the one place
   that does it for the scan.
 
+- **The Diagnostics pane remembers where the last full system report
+  landed.** `tool_full_report` used to only log the saved path into the
+  drawer, so finding it again after switching sections meant re-reading a
+  scrollback or re-running the whole report. `sig_report_saved` carries the
+  path to `App._last_report_path`, shown as a badge + Copy-path button
+  above the tool grid (`_refresh_report_row`) — state that, like the
+  updater panel's, has to be explicitly restored after `_build_pages()`
+  rebuilds the page on every rescan.
+
+- **The Drivers pane's links can be copied, not just opened.** "Copy link"
+  sits next to both "This system" and "Open downloads list" — the same
+  URLs, for pasting into a chat or a ticket instead of opening a browser
+  here.
+
+- **Every clipboard copy shows the same brief on-screen confirmation.** The
+  drawer's "copy", "Copy summary", both "Copy path" buttons (the Diagnostics
+  last-report row and the updater panel) and both Drivers "Copy link"
+  buttons used to rely on the status bar alone, which is easy to miss —
+  there is no other feedback that a click landed. `widgets.Toast` is a
+  self-dismissing badge-styled label; `App._copy_with_toast(text)` is the
+  one place that sets the clipboard and shows it, and every copy site above
+  calls it (`Drawer._copy` goes through its own `on_copy` hook instead,
+  since it has no `App` reference). Its hide timer is a UI animation tick
+  in the same idiom as `Spinner`'s and `TimedBar`'s, not a background
+  process: nothing ticks while no toast is showing. It is a floating child
+  of the central widget rather than something in a layout, so
+  `App.resizeEvent` calls `toast.reposition()` whenever the window is
+  resized while one is showing — otherwise a toast shown just before a
+  resize would stay centred over where the window used to be.
+
 - **DP/HDMI and Audio cards are identified but not located.** Upstream says
   so outright: the HID API it goes through abstracts away the USB topology,
   "so we can't figure out which port the card is connected to". They are
@@ -360,6 +454,25 @@ failure mode to watch for.
   row stays lit and the bar animates for the rest of the session. Guard at
   the top of the handler. `tests/test_smoke_gui.TestBusyGuard` covers it.
 
+- **"Run all safe diagnostics" is one `run_tool` call, not N of them.**
+  `_run_all_safe_diagnostics` reads every listed tool's params off its own
+  editor on the UI thread (same rule as a single tool — a worker must never
+  touch a widget) and freezes them into a plan, then hands the whole plan
+  to one `run_tool(lambda: self._run_all_worker(plan))`. `_run_all_worker`
+  calls each `tool_<key>` method directly, in order, checking `self._cancel`
+  between them — the same flag and the same per-tool `finally:`-block
+  restores every individual tool already has, unrelated to how it was
+  invoked. Danger tools (`fan_burst`) are filtered out of the plan before
+  the confirm dialog is even built. `tool_detail`'s step grid is
+  deliberately **not** reused here: a sub-tool's own `_progress` calls index
+  into it by its own step count, which would collide with a chain-level
+  grid sized to the number of tools instead. Progress during a chain shows
+  through row highlighting (`sig_chain_step` → `_on_chain_step`) and the
+  status bar instead, and Cancel is the "Run all safe diagnostics" button
+  itself, relabelled and reconnected to `_request_cancel` for the run's
+  duration — restored by `_tool_done`, which already fires exactly once at
+  the end of any `run_tool` call, chain or single tool.
+
 - **Expansion-card marks are drawn, not shipped.** `module_icons.py` holds
   an 18×18 stroke path per module type, in the same idiom as the rail icons,
   so they tint to the port's state and stay sharp at any scale with no image
@@ -370,12 +483,67 @@ failure mode to watch for.
   nothing else does, so that is the only inference made.
   `readings["module_hints"]` is the seam where real per-bay identification
   plugs in if the CLI ever reports it; until then an unidentified bay gets
-  the neutral mark, not a plausible guess.
+  the neutral mark, not a plausible guess. Each bay row's "Label…" button is
+  the manual equivalent — a note a person types themselves ("My 1TB SSD"),
+  never sent anywhere, stored in `appstate.py`'s `bay_labels` keyed by board
+  string and bay key (`App._bay_key_for_index`: the port's own CLI-given
+  name where one exists, else a positional fallback) so it is never shown
+  against the wrong machine or the wrong slot. `_fill_bays` prefers it over
+  the generic name/placeholder once set, on the same reasoning as the
+  neutral mark: this app should never guess, but a person saying what their
+  own hardware is is not a guess.
 
 - **A setting lives on the pane it changes.** The charge presets were
   Diagnostics entries, so running one rewrote two Settings rows from a
   different section with no sign there that anything had moved. They are
   `navigation.SETTINGS_PRESETS` now, rendered above the rows they set.
+  `_apply_preset` used to fill both rows immediately, before the command
+  that was supposed to set them had even run — a cancelled pkexec prompt or
+  a value the device refused still left the rows claiming it had taken.
+  `tool_preset` fills them now, from what it actually confirmed: a real
+  `--charge-limit` re-read for the row that has one, the set command's own
+  exit code for `charge_rate` (which has none — `"get": None` on that row),
+  the same standard `_get_setting_worker`/`_auto_setting_worker` already
+  held every other row to. The pane's Export/Import buttons
+  (`_export_settings`/`_import_settings`) write and read every row's
+  current field value as JSON — a local backup, never a read of or write to
+  the device. Import only fills editors (`_on_fill`, the same path a Get
+  uses): a row this device does not have, or a combo value that is not one
+  of its choices, is skipped rather than guessed at, and nothing reaches
+  the device until each row's own Set is pressed, same as typing the value
+  in by hand.
+
+- **The RGB row's hex field is free text a person typed, not CLI output.**
+  `_set_rgb_all` used to hand whatever was in the field straight to
+  `--rgbkbd`; it now refuses anything that is not a 6-digit hex colour
+  (`App.RE_HEX_COLOUR`) rather than running the command with a bogus
+  argument and letting framework_tool be the one to complain.
+
+- **The Fans pane's sensor list sorts hottest-first.** `--thermal`'s own
+  order is neither sorted nor stable between boards, so the one reading
+  worth noticing was sometimes buried below several others. `_fill_sensors`
+  keeps the existing `SensorRow` widgets (never rebuilt, so `TestBusyGuard`-
+  style state loss does not apply here) and `_reorder_sensors` repositions
+  them in the layout with `removeWidget`/`addWidget` on every read.
+
+- **Temperature readings can display in Celsius or Fahrenheit; settings in
+  Celsius never do.** The pane footer's "Temperature" toggle (next to
+  Appearance, persisted the same way) only touches read-only displays —
+  the Overview CPU card and the Fans sensor rows, both through
+  `App._format_temp`. The CPU limits pane's Tctl field is a *setting* sent
+  to RyzenAdj/RAPL in Celsius, not a reading, and is deliberately untouched:
+  converting it would mean converting a typed value back before it reaches
+  a command, which is exactly the kind of unit mismatch `power.py`'s "watch
+  the units" note already warns about elsewhere. `parsers.celsius_to_fahrenheit`
+  is the one place the arithmetic happens, kept stdlib-only and tested
+  without a display, the same as every other pure conversion in this app.
+
+- **The Console pane remembers what you actually ran, apart from the
+  curated defaults.** `navigation.RECENT_SUGGESTIONS` is a fixed list;
+  `App._custom_history` is session-only, most-recent-first, deduplicated,
+  and capped at `HISTORY_LIMIT` (8) — rendered as its own "History" row,
+  hidden until the first command runs so an empty row does not sit there
+  saying nothing.
 
 - **Read a setting with the reader its row names.** framework_tool prints
   more than one number in some of these blocks and the generic reader took
@@ -470,9 +638,21 @@ failure mode to watch for.
     Framework keeps one downloads list per device build that is always
     current, and the Knowledge Base 403s scripted fetches anyway. An earlier
     version scraped the bundle link out of the page; `test_drivers.py` has a
-    guard that fails if any networking creeps back into the module. The
-    app's only network access now lives in `deps.py` (fetching a helper's
-    GitHub release), which is why the Flatpak needs no `--share=network`.
+    guard that fails if any networking creeps back into the module.
+  - `updater.py` is the Setup pane's "Check for updates": compares
+    `frameworkgui.__version__` against this repo's latest GitHub release and,
+    if newer, offers the matching asset (`FrameworkGUI-Setup.exe` on Windows,
+    `FrameworkGUI.flatpak` on Linux) for download — through `deps.py`'s
+    `fetch_text`/`download_file`, the same functions the RyzenAdj download
+    already uses, so there is still exactly one place in the app that speaks
+    HTTP. It goes no further than a saved path and a Copy button: this app
+    has never executed a downloaded installer on the user's behalf (see
+    "Deliberately out of scope" below), and a self-updater doesn't get an
+    exception to that. Unlike `deps.py`'s Windows-only download path, the
+    check itself needs the network on *both* platforms — there is no portal
+    for "fetch this URL" the way there is for opening a link — so the
+    Flatpak manifest now carries `--share=network`, which it did not before
+    this existed.
 
 - **Blocked commands** (`App.BLOCKED` in `app.py`):
   `--flash-ec`, `--flash-ro-ec`, `--flash-rw-ec`, `--flash-gpu-descriptor*`,
@@ -487,14 +667,17 @@ failure mode to watch for.
   so the UI never blocks; results come back by emitting a Qt signal, which
   Qt queues onto the UI thread. A worker thread must never touch a widget —
   `sig_log`, `sig_status`, `sig_detected`, `sig_progress`, `sig_readings`,
-  `sig_fill` and `sig_tool_done` are the whole interface between them and
-  the UI, and that is the Qt equivalent of the Tk version's `after(0, …)`
-  rule. The 14 diagnostics are multi-step sequences with a shared cancel
-  flag (`self._cancel`) checked between steps; the multi-step ones report
+  `sig_fill`, `sig_tool_done`, `sig_update_checked` and
+  `sig_update_downloaded` are the whole interface between them and the UI,
+  and that is the Qt equivalent of the Tk version's `after(0, …)` rule. The
+  14 diagnostics are multi-step sequences with a shared cancel flag
+  (`self._cancel`) checked between steps; the multi-step ones report
   per-step progress into the Diagnostics detail panel, whose "Cancel and
   restore auto" button stays reachable for the whole run. State-changing
   tools (fan duty, kb backlight, fingerprint LED) always restore the
-  previous/auto state in a `finally` block, including on cancel.
+  previous/auto state in a `finally` block, including on cancel. Every one
+  of those signals is emitted through `App._emit`, never `.emit()`
+  directly — see the gotcha below.
 
 ## Known gotchas (learned the hard way — don't reintroduce these)
 
@@ -583,6 +766,27 @@ failure mode to watch for.
    loop turn (a short `QTimer.singleShot` after `processEvents()`) before
    `window.grab()`. Worth knowing before "fixing" a
    layout bug that isn't there.
+
+10. **Closing the window does not stop the daemon thread a command is
+    running on.** Every worker thread's next `_log`/`set_status`/etc. call
+    used to emit straight into `self.sig_*`, and if the window had been
+    closed mid-run (Rescan, a Diagnostics tool, a Settings write, the
+    updater) that emitted into a QObject Qt was already tearing down —
+    surfacing as a bare `TypeError: only accepts 0 argument(s), N given!`
+    on the thread's own stderr, invisible unless something happened to be
+    watching the console. It was hiding in this project's own test suite:
+    running as root (true of most CI/sandbox containers) makes
+    `_apply_detection` kick off a second background thread
+    (`_read_sensors`) right after every scan, and `tests/test_smoke_gui.py`
+    `_drive_app()`'s watcher tore the window down the instant detection
+    landed without waiting for that second thread — every test run was
+    quietly racing it. `App._emit` (checked by `closeEvent`'s `_closing`
+    flag, with a `try/except RuntimeError` backstop for a report already in
+    flight the instant it ran) is what every `sig_*.emit()` call goes
+    through now; add a new one the same way. It cannot cancel the thread
+    itself — a `finally:`-block hardware restore (fan/backlight/fingerprint
+    LED) still runs — only stop that thread's next report from being the
+    reason an exception lands on someone else's stderr.
 
 ## Not yet verified (be skeptical, not confident)
 
@@ -679,7 +883,10 @@ failure mode to watch for.
   into. Rehearse it before relying on a release. `tests/test_packaging.py`
   still only checks the manifest's *structure*, and the
   `flatpak-spawn --host` runtime behaviour remains unexercised regardless of
-  whether the build goes green.
+  whether the build goes green. It also now carries `--share=network` for
+  `updater.py`, which has never been exercised inside the sandbox either —
+  confirm "Check for updates" actually reaches GitHub from a built Flatpak,
+  not just from a source checkout.
 - **`windows/build.bat` now installs PySide6 and bundles `assets/`, and
   neither change has been through CI yet.** The exe will be far larger than
   the Tkinter one. If it fails to launch, the first thing to check is
@@ -725,9 +932,59 @@ failure mode to watch for.
   at it and the Drivers pane can link it, but nothing here can script it. On
   Intel, `powercfg` (Windows) and RAPL (Linux) are what the app can actually
   drive.
-- **Running downloaded installers.** The Drivers pane downloads a bundle and
-  stops there. Executing a vendor installer unattended, as an elevated
-  process, is not something this app should do on a user's behalf.
+- **Running downloaded installers.** Setup's helper-tool downloads
+  (`deps.py`) and the Setup pane's "Check for updates" (`updater.py`) both
+  stop at a saved file. Executing a vendor installer, or this app's own
+  updated installer, unattended and as an elevated process, is not
+  something this app should do on a user's behalf. Checking for an update
+  and downloading it are not the exception — only running one would be.
+- **A tray icon.** It showed up on an early pass over what a "system
+  monitor" feature could look like — a persistent battery/thermal readout
+  living in the tray. It is a background process by definition (something
+  alive between button clicks, on both OSes), so the same rule that rules
+  out a systemd unit or a Windows service for persisting power limits rules
+  this out too. It was never built, not even behind a flag.
+- **Fully unattended install** (fetch the latest release, verify it, run
+  the installer, relaunch, with no confirmation step). The user was asked
+  directly whether the updater should do this or only check-and-download,
+  and chose check-and-download — see "Running downloaded installers" above
+  for why that also matches the project's existing position on installers
+  it downloads itself.
+- **A systemd unit / Task Scheduler task that reapplies CPU limits at
+  boot.** The natural follow-up to "limits don't survive a reboot" is "so
+  write something that reapplies them on login" — which is exactly the
+  background-process trade the first bullet in this section already
+  declines. Noted here again because it is the single most likely feature
+  request this project will get once someone actually uses the CPU limits
+  pane daily.
+- **Translations / i18n.** Every string in `navigation.py`, `app.py` and
+  the theme is written in place rather than looked up by key, and no
+  locale-selection mechanism exists anywhere in the app. Framework sells in
+  enough locales that this is a real gap, not a hypothetical one — but
+  retrofitting a string table across a UI this size is a large, mechanical
+  project of its own, better done as a deliberate pass than folded into
+  unrelated feature work.
+- **An Overview "health summary" card** (a single badge rolling up battery
+  health, thermal headroom and privacy-switch state into one "looks fine" /
+  "check this" verdict). Skipped for two reasons, not just one: framework_tool
+  reports a raw battery-health percentage and nothing else — Framework
+  documents no "this percentage means degraded" threshold, and the project's
+  standing rule (see `detect_model()`'s fail-open default and every parser's
+  raw-output fallback) is to show what the CLI said rather than a judgement
+  call this app has no basis for. Separately, a privacy-switch rollup would
+  need `run()`/`_single_worker()` (the Ports & modules query path) to start
+  populating `self.readings`, which today it never does — it only logs to
+  the drawer — and that is a bigger, riskier change to the query pipeline
+  than a summary card justifies on its own. Worth revisiting if Framework
+  ever documents real health thresholds, or if the ports pipeline gets
+  reworked for another reason first.
+- **A true light theme.** `theme.py`'s two appearances (`acrylic`/`opaque`,
+  `theme.APPEARANCES`) are both dark surfaces from the same design handoff
+  — the handoff never specified a light palette, and inventing token values
+  for one wasn't a small addition the same way a new settings row is. The
+  contrast work this session did (`relative_luminance`/`contrast_ratio` in
+  `theme.py`, `tests/test_theme.TestTextContrast`) checked the existing dark
+  tokens; it did not add a second palette.
 
 ## Releasing
 

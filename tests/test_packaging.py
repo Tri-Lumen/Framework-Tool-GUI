@@ -1,6 +1,6 @@
 """Packaging checks — cheap guards against shipping a broken build.
 
-The app is a package of fourteen modules plus its assets, and every
+The app is a package of seventeen modules plus its assets, and every
 packaging path (PyInstaller build, script install, Flatpak manifest) has to
 carry all of it. A miss doesn't show up until the app launches on a target
 machine and dies with ModuleNotFoundError. These tests are the stand-in for
@@ -49,7 +49,7 @@ class TestAppModules(unittest.TestCase):
             "__init__.py", "__main__.py", "app.py", "app_icon.py",
             "appstate.py", "backdrop.py", "deps.py", "device_images.py",
             "drivers.py", "iconpaths.py", "module_icons.py", "navigation.py",
-            "parsers.py", "power.py", "theme.py", "widgets.py"])
+            "parsers.py", "power.py", "theme.py", "updater.py", "widgets.py"])
 
     def test_the_launcher_is_the_only_python_file_at_the_root(self):
         """One entry point, and the app itself in the package beside it.

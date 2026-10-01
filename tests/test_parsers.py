@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from frameworkgui.parsers import (  # noqa: E402
     ac_connected,
     bay_orientation,
+    celsius_to_fahrenheit,
     detect_model,
     parse_charge_limit,
     parse_firmware,
@@ -647,3 +648,18 @@ class TestAcConnected(unittest.TestCase):
 
     def test_the_sample_output_is_connected(self):
         self.assertIs(ac_connected(POWER_VV), True)
+
+
+class TestCelsiusToFahrenheit(unittest.TestCase):
+
+    def test_freezing(self):
+        self.assertEqual(celsius_to_fahrenheit(0), 32.0)
+
+    def test_boiling(self):
+        self.assertEqual(celsius_to_fahrenheit(100), 212.0)
+
+    def test_a_typical_cpu_reading(self):
+        self.assertAlmostEqual(celsius_to_fahrenheit(61), 141.8)
+
+    def test_negative(self):
+        self.assertAlmostEqual(celsius_to_fahrenheit(-40), -40.0)

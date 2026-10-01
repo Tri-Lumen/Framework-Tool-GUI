@@ -426,13 +426,20 @@ class RailButton(QAbstractButton):
         self._icon = group["icon"]
         self._cache = {}
 
-    def _pixmap(self, active):
-        token = "accent.icon" if active else "icon"
+    def _pixmap(self, token):
         if token not in self._cache:
             ratio = self.devicePixelRatioF() or 1.0
             self._cache[token] = stroke_pixmap(self._icon, colour(token),
                                                18, ratio)
         return self._cache[token]
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -442,7 +449,18 @@ class RailButton(QAbstractButton):
             painter.fillRect(self.rect(), qcolour("accent.rail"))
             painter.fillRect(0, 0, 2, self.height(),
                              qcolour("accent.bright"))
-        pixmap = self._pixmap(active)
+        # Unselected but hovered gets a brighter icon than idle - the only
+        # feedback a mouse gets on this control otherwise is the cursor,
+        # since there is no border or fill to change the way a QPushButton
+        # has. Distinct from the active tint rather than a step toward it,
+        # so hovering never reads as "about to select".
+        if active:
+            token = "accent.icon"
+        elif self.underMouse():
+            token = "text.secondary"
+        else:
+            token = "icon"
+        pixmap = self._pixmap(token)
         x = (self.width() - 18) // 2
         y = (self.height() - 18) // 2
         painter.drawPixmap(x, y, pixmap)
@@ -466,19 +484,34 @@ class PaneItem(QAbstractButton):
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         active = self.isChecked()
+        hovered = not active and self.underMouse()
         if active:
             painter.fillRect(self.rect(), qcolour("accent.selected"))
             painter.fillRect(0, 0, 2, self.height(),
                              qcolour("accent.bright"))
+        elif hovered:
+            # A fainter version of the same fill an active row gets, so
+            # hovering reads as "about to select" without being mistaken
+            # for the selected row itself - no accent bar, no icon-style
+            # affordance to lean on here the way RailButton has.
+            painter.fillRect(self.rect(), qcolour("row"))
         font = painter.font()
         font.setPixelSize(theme.FONT_SIZES["body"])
         painter.setFont(font)
-        painter.setPen(QColor(colour("text.primary" if active
-                                     else "text.secondary")))
+        painter.setPen(QColor(colour(
+            "text.primary" if (active or hovered) else "text.secondary")))
         painter.drawText(self.rect().adjusted(12, 0, -8, 0),
                          Qt.AlignVCenter | Qt.AlignLeft, self.text())
         painter.end()
@@ -539,6 +572,31 @@ class Segmented(QWidget):
         painter.setClipping(False)
         painter.setPen(qcolour("button.border"))
         painter.drawPath(path)
+        painter.end()
+
+
+class StatusDot(QWidget):
+    """A small filled circle, for a status that reads faster as colour than
+    as text — the status bar's elevation indicator. `set_state` takes any
+    theme token name; the caller decides what state means what colour."""
+
+    SIZE = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self._token = "icon"
+
+    def set_state(self, token):
+        self._token = token
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(qcolour(self._token))
+        painter.drawEllipse(0, 0, self.SIZE, self.SIZE)
         painter.end()
 
 
@@ -999,3 +1057,44 @@ class ImageSlot(QFrame):
         y = (self.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
         painter.end()
+
+
+class Toast(QLabel):
+    """A brief, self-dismissing confirmation — "Copied to clipboard" and
+    the like, for the handful of actions (a clipboard copy, mainly) that
+    otherwise gave no sign anything had happened beyond a status-bar line
+    easy to miss in the corner of the eye.
+
+    The auto-hide timer is the same kind of thing `Spinner`'s and
+    `TimedBar`'s already are, not a background process: it only exists
+    between `show_message()` and the next time it fires, and nothing ticks
+    while no toast is showing. It floats over its parent rather than sitting
+    in a layout, so it re-centres itself on its parent's bottom edge both
+    when shown and whenever the parent is resized while it is visible —
+    `reposition()` is exposed for the parent's own `resizeEvent` to call.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setProperty("role", "badge")
+        self.setProperty("badge", "accent")
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignCenter)
+        self.hide()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def reposition(self):
+        if self.parentWidget() is not None:
+            parent_rect = self.parentWidget().rect()
+            self.move((parent_rect.width() - self.width()) // 2,
+                     parent_rect.height() - self.height() - 24)
+
+    def show_message(self, text, duration_ms=2200):
+        self.setText(text)
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+        self._timer.start(duration_ms)

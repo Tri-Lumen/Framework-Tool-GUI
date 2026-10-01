@@ -384,6 +384,13 @@ QPushButton {
 }
 QPushButton:hover { border-color: %(text.faint)s; }
 QPushButton:disabled { color: %(text.faint)s; border-color: %(border)s; }
+QPushButton:pressed { background: %(accent.rail)s; }
+/* Qt draws no focus indication of its own once a style sheet is in force,
+   so a button reached by Tab or by the F5/Ctrl+N shortcuts otherwise gives
+   no sign it is the one that will fire on Enter. `outline` rather than
+   `border`: it does not shift the button's box or its neighbours' layout
+   the way changing `border` on focus would. */
+QPushButton:focus { outline: 1px solid %(accent)s; outline-offset: 1px; }
 QPushButton[role="accent"] {
     background: %(accent.fill)s;
     border: 1px solid %(accent)s;
@@ -469,6 +476,9 @@ QLineEdit, QComboBox, QSpinBox {
     color: %(text.primary)s;
     padding: 5px 9px;
     selection-background-color: %(accent)s;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border-color: %(accent)s;
 }
 QLineEdit[role="mono"], QComboBox[role="mono"] {
     font-family: '%(font.mono)s', %(font.fallback.mono)s;
@@ -631,6 +641,33 @@ def parse_colour(value):
     if text.startswith("#") and len(text) == 7:
         return (int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16), 255)
     raise ValueError("unrecognised colour: {!r}".format(value))
+
+
+def relative_luminance(rgb):
+    """WCAG relative luminance of an (r, g, b[, a]) tuple, 0.0-1.0.
+
+    Ignores alpha — this is for auditing text-on-surface contrast, and a
+    translucent surface's actual luminance depends on whatever it is
+    composited over, which this module has no way to know. Callers stick
+    to the opaque appearance's flat surfaces for that reason.
+    """
+    def linearise(channel):
+        c = channel / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb[0], rgb[1], rgb[2]
+    return 0.2126 * linearise(r) + 0.7152 * linearise(g) + 0.0722 * linearise(b)
+
+
+def contrast_ratio(colour_a, colour_b):
+    """WCAG contrast ratio between two token values (anything `parse_colour`
+    accepts) — 1.0 (identical) to 21.0 (black on white). 4.5 is the AA
+    threshold for normal-size text; 3.0 is AA for large text and non-text
+    UI components (borders, icons) per WCAG 1.4.11.
+    """
+    luminance_a = relative_luminance(parse_colour(colour_a))
+    luminance_b = relative_luminance(parse_colour(colour_b))
+    lighter, darker = max(luminance_a, luminance_b), min(luminance_a, luminance_b)
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 def bar_colour(fraction, warm_at=0.60):

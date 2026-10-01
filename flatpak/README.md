@@ -71,10 +71,13 @@ flatpak uninstall --user io.github.frameworkgui.FrameworkGUI
   `flatpak-spawn --host` - that is what the
   `--talk-name=org.freedesktop.Flatpak` permission in the manifest is for.
   This is an intentional sandbox escape; without it the app is useless.
-- There is deliberately no `--share=network`. The Drivers section only opens
-  links, which goes through the portal, and the only code path that
-  downloads anything (fetching a helper tool's GitHub release) is
-  Windows-only. Nothing in the Flatpak build needs network access.
+- The manifest carries `--share=network` for one reason: the Setup section's
+  "Check for updates" (updater.py) has to make its own HTTPS request against
+  GitHub's API, and there is no portal for that the way there is for opening
+  a link. The Drivers section still only opens links (the portal, no network
+  permission needed), and deps.py's helper-release download is still
+  Windows-only. Checking for and downloading an update never installs it —
+  see CLAUDE.md's "Deliberately out of scope".
 - The Setup section's installs run on the *host* (same `flatpak-spawn --host`
   path as every other command, plus pkexec), so a helper installed from here
   lands in the host's package manager, not in the sandbox. That is what you

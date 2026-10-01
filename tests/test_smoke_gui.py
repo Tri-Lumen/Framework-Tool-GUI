@@ -153,14 +153,21 @@ def _drive_app(timeout_ms):
         results["title"] = window.windowTitle()
         results["tool_version"] = window.tool_version
         results["firmware"] = dict(window.firmware)
+        results["scanned_label"] = window.scanned_label.text()
         for section, page in window.pages.items():
             results["buttons:" + section] = buttons_in(page)
             results["labels:" + section] = labels_in(page)
 
     def watcher():
         # "Detecting…" is the pre-scan placeholder; anything else means the
-        # scan thread has reported back (success or fail-open).
-        if window.caps.get("model") != "Detecting…":
+        # scan thread has reported back (success or fail-open). Also wait
+        # for _busy: running as root (true in most CI/sandbox containers),
+        # _apply_detection kicks off a second background thread to read
+        # sensors right after detection finishes, and closing the window
+        # while that thread is still going raced it into emitting a signal
+        # into a torn-down QObject - the same race settle() below already
+        # guards against.
+        if window.caps.get("model") != "Detecting…" and not window._busy:
             snapshot()
             app.quit()
         else:
@@ -285,6 +292,14 @@ class TestGuiSmoke(unittest.TestCase):
     def test_overview_reads_the_firmware_versions(self):
         r = run_app_and_capture(VERSIONS_L12)
         self.assertEqual(r["firmware"]["ec"], "hx20 0.0.9")
+
+    def test_overview_shows_when_it_was_last_scanned(self):
+        # There is no background refresh - "Rescan device" is the only way
+        # the readings change - so without this a five-minute-old reading
+        # looks identical to a fresh one.
+        r = run_app_and_capture(VERSIONS_L12)
+        self.assertRegex(r["scanned_label"],
+                         r"^Last scanned \d{2}:\d{2}:\d{2}$")
 
     def test_status_bar_learns_the_tool_version(self):
         r = run_app_and_capture(VERSIONS_L16)
@@ -503,6 +518,39 @@ class TestBusyGuard(unittest.TestCase):
         self.assertEqual(window._editor_value("charge_limit"), before,
                          "the editor shows a value no command ever wrote")
 
+    def test_a_failed_preset_command_does_not_fill_the_row_with_a_lie(self):
+        window = self.window
+        if "charge_limit" not in window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+        limit_before = window._editor_value("charge_limit")
+        rate_before = window._editor_value("charge_rate")
+        window._exec = lambda args, timeout=60, echo=True: (1, "refused")
+        window.tool_preset("80", "1")
+        self.assertEqual(
+            window._editor_value("charge_limit"), limit_before,
+            "the row shows a value the device never confirmed setting")
+        self.assertEqual(
+            window._editor_value("charge_rate"), rate_before,
+            "the row shows a rate the device never confirmed setting")
+
+    def test_a_successful_preset_fills_from_the_confirmed_readback(self):
+        window = self.window
+        if "charge_limit" not in window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+        def fake_exec(args, timeout=60, echo=True):
+            if args == ["--charge-limit"]:
+                # The firmware clamped the request - the row must show
+                # what it actually confirmed, not the 80 that was asked
+                # for, which is the whole point of reading it back.
+                return (0, "Minimum 0%, Maximum 65%")
+            return (0, "")
+        window._exec = fake_exec
+        window.tool_preset("80", "1")
+        self.assertEqual(window._editor_value("charge_limit"), "65")
+        if "charge_rate" in window.settings_widgets:
+            self.assertEqual(window._editor_value("charge_rate"), "1")
+
 
 @unittest.skipUnless(CAN_RUN,
                      "PySide6 unavailable or no Qt platform plugin")
@@ -546,6 +594,27 @@ class TestChassisFollowsTheModel(unittest.TestCase):
         self.assertGreater(w16, w12,
                            "the Laptop 16 is not drawn wider than the 12")
         self.assertGreater(h16, h12)
+
+    def test_a_laptop_16_gets_six_bay_rows_not_four(self):
+        # module_rows used to be a hardcoded range(4), so two of the
+        # Laptop 16's six bays never got a row - or a state on the
+        # diagram, which reads whatever states _fill_bays happened to
+        # build from that same loop.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            make_stub_binary(tmpdir, VERSIONS_L16)
+            old = os.environ.get("PATH", "")
+            os.environ["PATH"] = tmpdir + os.pathsep + old
+            try:
+                app = QApplication.instance() or QApplication([])
+                window = fg.App()
+                settle(app, window)
+                count = len(window.module_rows)
+                window.close()
+                window.deleteLater()
+                app.processEvents()
+            finally:
+                os.environ["PATH"] = old
+        self.assertEqual(count, 6)
 
 
 # Named exactly as a real Laptop 13 AMD reported them (--pdports-chromebook),
@@ -620,6 +689,21 @@ class TestBayOrdering(unittest.TestCase):
         ordered = self.window._ordered_by_bay(ports, chassis)
         self.assertEqual(len(ordered), 4)
 
+    def test_a_fifth_port_on_a_four_bay_chassis_is_not_dropped(self):
+        # The four named slots are all taken before a fifth, differently
+        # named port is even considered - it used to fall out of the
+        # `slots` list entirely once every slot was full, which silently
+        # threw a real port away instead of just showing it unordered.
+        ports = parsers.parse_ports(FOUR_BAY_PDPORTS)
+        extra = dict(ports[0])
+        extra["port"] = "4"
+        extra["name"] = "Extra Bay"
+        ports.append(extra)
+        chassis = device_images.chassis_for("Laptop 13")
+        ordered = self.window._ordered_by_bay(ports, chassis)
+        self.assertEqual(len(ordered), 5)
+        self.assertIn("Extra Bay", [p["name"] for p in ordered])
+
 
 @unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
 class TestManufacturerTdpRange(unittest.TestCase):
@@ -649,3 +733,1161 @@ class TestManufacturerTdpRange(unittest.TestCase):
         from frameworkgui import power
         self.assertRaises(power.PowerError,
                           self.window._check_manufacturer_range, "5")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestCloseDuringBackgroundWork(unittest.TestCase):
+    """A worker thread's next report must not crash once the window is
+    closing - see App._emit/closeEvent. Real trigger: closing the app while
+    Rescan, a Diagnostics tool, a Settings write or the updater is still
+    running on its daemon thread. Reproduced (before the fix) as a bare
+    `TypeError: only accepts 0 argument(s), 3 given!` out of _log whenever
+    this suite ran as root, because _apply_detection starts a second
+    background thread (_read_sensors) that _drive_app's old watcher did not
+    wait for before tearing the window down.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_closing_stops_further_log_and_status_reports(self):
+        window = self.window
+        before_status = window.status_message.text()
+        window.close()
+        self.assertTrue(window._closing)
+        # Exactly what a worker thread still running in the background
+        # would call next - none of these may raise, and none may reach a
+        # widget once closeEvent has run.
+        window._log("framework_tool", "late output\n")
+        window.set_status("late status")
+        window._emit(window.sig_tool_done)
+        self.assertEqual(window.status_message.text(), before_status)
+
+    def test_emit_survives_a_signal_that_raises_runtimeerror(self):
+        # The actual PySide6 failure mode - emitting into a QObject whose
+        # C++ side is already gone - without needing to force real object
+        # deletion, which is timing-dependent and not reproducible on
+        # demand.
+        class ExplodingSignal:
+            def emit(self, *args):
+                raise RuntimeError("Internal C++ object already deleted.")
+
+        self.window._emit(ExplodingSignal())  # must not raise
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRailButtonHover(unittest.TestCase):
+    """A RailButton is fully self-painted, so unlike a QPushButton it gets
+    no hover feedback for free - enterEvent/leaveEvent have to ask for a
+    repaint themselves."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_enter_and_leave_do_not_raise_and_request_a_repaint(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QEnterEvent
+
+        from frameworkgui.navigation import RAIL_GROUPS
+        from frameworkgui.widgets import RailButton
+        button = RailButton(RAIL_GROUPS[0])
+        origin = QPointF(0, 0)
+        button.enterEvent(QEnterEvent(origin, origin, origin))
+        button.leaveEvent(QEvent(QEvent.Type.Leave))
+
+    def test_hover_and_active_use_different_icon_tints(self):
+        from frameworkgui.navigation import RAIL_GROUPS
+        from frameworkgui.widgets import RailButton
+        button = RailButton(RAIL_GROUPS[0])
+        self.assertIsNot(button._pixmap("icon"),
+                         button._pixmap("text.secondary"))
+        self.assertIsNot(button._pixmap("text.secondary"),
+                         button._pixmap("accent.icon"))
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDriversCopyLink(unittest.TestCase):
+    """The Drivers pane's "Copy link" buttons - the same URLs "Open"
+    already reaches, for someone who wants to paste the link elsewhere
+    (a chat, a ticket) rather than have it opened here."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_both_copy_link_buttons_are_present(self):
+        buttons = buttons_in(self.window.pages["drivers"])
+        self.assertEqual(buttons.count("Copy link"), 2)
+
+    def test_copying_the_selected_build_puts_its_url_on_the_clipboard(self):
+        window = self.window
+        url = window.driver_choice.currentData()
+        self.assertTrue(url)
+        window._copy_selected_driver_link()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(), url)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestLastReportPath(unittest.TestCase):
+    """The Diagnostics pane remembers where the last "Full system report"
+    landed, so a second look does not mean re-running the whole report to
+    find the path again - and that state survives _build_pages() rebuilding
+    the page after every rescan, the same way the updater panel's state
+    does."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def report_row_texts(self):
+        row = self.window.report_row
+        return [row.itemAt(i).widget().text() for i in range(row.count())
+               if row.itemAt(i).widget() is not None]
+
+    def test_nothing_shown_before_a_report_has_been_saved(self):
+        self.assertEqual(self.report_row_texts(), [])
+
+    def test_a_saved_report_shows_its_path_and_a_copy_button(self):
+        self.window._show_report_path("/tmp/framework_report_x.txt")
+        texts = self.report_row_texts()
+        self.assertIn("Last report: /tmp/framework_report_x.txt", texts)
+        self.assertIn("Copy path", texts)
+
+    def test_the_path_survives_a_page_rebuild(self):
+        window = self.window
+        window._show_report_path("/tmp/framework_report_x.txt")
+        window._build_pages()
+        self.assertIn("Last report: /tmp/framework_report_x.txt",
+                      self.report_row_texts())
+
+    def test_clicking_copy_path_puts_it_on_the_clipboard_and_shows_a_toast(self):
+        window = self.window
+        window._show_report_path("/tmp/framework_report_x.txt")
+        row = window.report_row
+        button = next(row.itemAt(i).widget() for i in range(row.count())
+                     if row.itemAt(i).widget() is not None
+                     and row.itemAt(i).widget().text() == "Copy path")
+        button.click()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "/tmp/framework_report_x.txt")
+        self.assertFalse(window.toast.isHidden())
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestSettingsBackup(unittest.TestCase):
+    """Export/Import on the Settings pane - a local backup of the field
+    values, never a read of or write to the device by itself."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        if "charge_limit" not in self.window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_export_writes_every_rows_current_value(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["charge_limit"].setText("77")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                window._export_settings()
+            with open(target, encoding="utf-8") as fh:
+                data = json.load(fh)
+        self.assertEqual(data["charge_limit"], "77")
+
+    def test_import_fills_matching_rows_without_running_anything(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump({"charge_limit": "55",
+                          "not_a_real_row": "x"}, fh)
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        self.assertEqual(window._editor_value("charge_limit"), "55")
+        window.run.assert_not_called()
+
+    def test_import_ignores_a_non_string_value(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        before = window._editor_value("charge_limit")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump({"charge_limit": 80}, fh)  # not a string
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        self.assertEqual(window._editor_value("charge_limit"), before)
+
+    def test_import_of_a_non_dict_file_warns_instead_of_crashing(self):
+        import json
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window._warn = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump([1, 2, 3], fh)
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        window._warn.assert_called_once()
+
+    def test_import_of_invalid_json_warns_instead_of_crashing(self):
+        import tempfile
+        from unittest import mock
+        window = self.window
+        window._warn = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "settings.json")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("{not json,")
+            with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                                   return_value=(target, "")):
+                window._import_settings()
+        window._warn.assert_called_once()
+
+    def test_cancelling_export_or_import_does_nothing(self):
+        from unittest import mock
+        window = self.window
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            window._export_settings()  # must not raise
+        with mock.patch.object(fg.QFileDialog, "getOpenFileName",
+                               return_value=("", "")):
+            window._import_settings()  # must not raise
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestCustomCommandHistory(unittest.TestCase):
+    """The Console pane's History row - what this user actually ran,
+    distinct from navigation.RECENT_SUGGESTIONS' curated defaults."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def chip_texts(self):
+        return [self.window.history_layout.itemAt(i).widget().text()
+               for i in range(self.window.history_layout.count())
+               if self.window.history_layout.itemAt(i).widget() is not None]
+
+    def test_history_is_hidden_until_something_has_run(self):
+        # isVisible() reflects the whole ancestor chain, and these tests
+        # never call window.show() - isHidden() is the widget's own
+        # explicit flag, which is what setVisible() in _refresh_history_row
+        # actually controls.
+        self.assertTrue(self.window.history_wrap.isHidden())
+
+    def test_running_a_command_shows_it_in_history(self):
+        self.window._remember_custom_command("--thermal")
+        self.assertFalse(self.window.history_wrap.isHidden())
+        self.assertIn("--thermal", self.chip_texts())
+
+    def test_repeating_a_command_moves_it_to_the_front_without_duplicating(self):
+        window = self.window
+        window._remember_custom_command("--versions")
+        window._remember_custom_command("--thermal")
+        window._remember_custom_command("--versions")
+        self.assertEqual(window._custom_history,
+                         ["--versions", "--thermal"])
+
+    def test_history_is_capped(self):
+        window = self.window
+        for i in range(window.HISTORY_LIMIT + 3):
+            window._remember_custom_command("--cmd{}".format(i))
+        self.assertEqual(len(window._custom_history), window.HISTORY_LIMIT)
+        # Most recent first, oldest fell off the end.
+        self.assertEqual(window._custom_history[0],
+                         "--cmd{}".format(window.HISTORY_LIMIT + 2))
+
+    def test_a_history_chip_fills_the_custom_command_field(self):
+        window = self.window
+        window._remember_custom_command("--pdports")
+        chip = next(window.history_layout.itemAt(i).widget()
+                   for i in range(window.history_layout.count())
+                   if window.history_layout.itemAt(i).widget() is not None
+                   and window.history_layout.itemAt(i).widget().text()
+                   == "--pdports")
+        chip.click()
+        self.assertEqual(window.custom.text(), "--pdports")
+
+    def test_run_custom_records_history_before_running(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.custom.setText("--power -vv")
+        window._run_custom()
+        self.assertIn("--power -vv", window._custom_history)
+        window.run.assert_called_once_with(["--power", "-vv"])
+
+    def test_a_blocked_command_is_not_remembered(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()  # a real QMessageBox.warning() would block
+        window.custom.setText("--flash-ec")
+        window._run_custom()
+        self.assertNotIn("--flash-ec", window._custom_history)
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestNumberRowValidation(unittest.TestCase):
+    """Settings number rows are checked against their own min/max
+    (navigation.SETTINGS_ROWS) before Set ever builds a command."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+        if "charge_limit" not in self.window.settings_widgets:
+            self.skipTest("no charge rows on this detected model")
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def row(self, key):
+        return next(r for r in fg.navigation.SETTINGS_ROWS if r["key"] == key)
+
+    def test_a_value_within_bounds_is_accepted(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("80")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_called_once_with(["--charge-limit", "80"])
+
+    def test_a_value_above_the_maximum_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("150")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+    def test_a_negative_value_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("-5")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+
+    def test_non_numeric_text_is_refused(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_limit"].setText("eighty")
+        window._set_setting(self.row("charge_limit"))
+        window.run.assert_not_called()
+
+    def test_a_row_with_no_published_maximum_accepts_a_large_value(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window.settings_widgets["charge_rate"].setText("5")
+        window._set_setting(self.row("charge_rate"))
+        window.run.assert_called_once_with(["--charge-rate-limit", "5"])
+
+    def test_a_row_with_no_published_maximum_still_enforces_its_floor(self):
+        from unittest import mock
+        window = self.window
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window.settings_widgets["charge_rate"].setText("-1")
+        window._set_setting(self.row("charge_rate"))
+        window.run.assert_not_called()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRgbValidation(unittest.TestCase):
+    """The RGB row's hex field is free text a person typed, not CLI output -
+    _set_rgb_all has to refuse something that is not a 6-digit hex colour
+    rather than handing framework_tool a bogus --rgbkbd argument."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_a_valid_hex_colour_runs_the_command(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("00ff00")
+        window.run = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_called_once_with(
+            ["--rgbkbd", "0"] + ["0x00ff00"] * 8)
+
+    def test_a_leading_hash_is_accepted(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("#00FF00")
+        window.run = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_called_once()
+
+    def test_an_invalid_colour_is_refused_without_running_anything(self):
+        from unittest import mock
+        window = self.window
+        window.settings_widgets["rgbkbd"].setText("not-a-colour")
+        window.run = mock.Mock()
+        window._warn = mock.Mock()
+        window._set_rgb_all()
+        window.run.assert_not_called()
+        window._warn.assert_called_once()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestTemperatureUnit(unittest.TestCase):
+    """The pane footer's C/F toggle - a display-only preference applied to
+    the Overview CPU card and the Fans sensor rows, persisted the same way
+    the appearance choice is. CPU limits' Tctl setting is untouched: it is
+    a value sent to a command, not a reading, and stays in Celsius."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+        # Several of these persist a choice via appstate.save() - reset so
+        # it never leaks into a later test's fresh fg.App().
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_defaults_to_celsius(self):
+        self.assertEqual(self.window.temp_unit, "C")
+        self.assertEqual(self.window.unit_segment._value, "C")
+
+    def test_switching_to_fahrenheit_updates_the_cpu_card(self):
+        window = self.window
+        window._apply_readings({"thermal": "CPU: 61 C\n"})
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "61 C")
+        window._set_temp_unit("F")
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "142 F")
+
+    def test_switching_to_fahrenheit_updates_sensor_rows(self):
+        window = self.window
+        window._apply_readings({"thermal": "F75303_Local: 30 C\n"})
+        window._set_temp_unit("F")
+        self.assertEqual(
+            window.sensor_rows["F75303_Local"].value.text(), "86 F")
+
+    def test_the_choice_is_persisted(self):
+        window = self.window
+        window._set_temp_unit("F")
+        self.assertEqual(fg.appstate.load()["temp_unit"], "F")
+
+    def test_switching_back_to_celsius_restores_the_original_reading(self):
+        window = self.window
+        window._apply_readings({"thermal": "CPU: 61 C\n"})
+        window._set_temp_unit("F")
+        window._set_temp_unit("C")
+        self.assertEqual(window.stat_cards["cpu"].value.text(), "61 C")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestSensorOrdering(unittest.TestCase):
+    """The Fans pane's sensor list, hottest first - --thermal's own order
+    is neither sorted nor stable between boards."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def rows_top_to_bottom(self):
+        holder = self.window.sensor_holder
+        names = []
+        for i in range(holder.count()):
+            widget = holder.itemAt(i).widget()
+            for name, row in self.window.sensor_rows.items():
+                if row is widget:
+                    names.append(name)
+        return names
+
+    def test_the_hottest_sensor_is_listed_first(self):
+        self.window._apply_readings({"thermal":
+            "Cool_Zone: 30 C\nHot_Zone: 78 C\nWarm_Zone: 52 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(),
+                         ["Hot_Zone", "Warm_Zone", "Cool_Zone"])
+
+    def test_reordering_on_a_later_read_moves_existing_rows(self):
+        window = self.window
+        window._apply_readings({"thermal": "A: 30 C\nB: 78 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(), ["B", "A"])
+        # The same two sensors, temperatures now reversed.
+        window._apply_readings({"thermal": "A: 90 C\nB: 20 C\n"})
+        self.assertEqual(self.rows_top_to_bottom(), ["A", "B"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestElevationDot(unittest.TestCase):
+    """The status bar's elevation dot mirrors whatever text
+    status_elevation shows - a colour, not a second source of truth."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_the_dot_matches_the_current_elevation_text(self):
+        window = self.window
+        window._refresh_statusbar()
+        expected = window.ELEVATION_DOT[window.status_elevation.text()]
+        self.assertEqual(window.elevation_dot._token, expected)
+
+    def test_every_elevation_state_maps_to_a_real_token(self):
+        from frameworkgui import theme
+        palette = theme.palette(theme.OPAQUE)
+        for state, token in self.window.ELEVATION_DOT.items():
+            self.assertIn(token, palette, "{} maps to an unknown token"
+                          .format(state))
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPaneItemHover(unittest.TestCase):
+    """PaneItem is self-painted like RailButton, so it gets no hover
+    feedback for free either."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_enter_and_leave_do_not_raise(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QEnterEvent
+
+        from frameworkgui.widgets import PaneItem
+        item = PaneItem("Settings", "settings")
+        origin = QPointF(0, 0)
+        item.enterEvent(QEnterEvent(origin, origin, origin))
+        item.leaveEvent(QEvent(QEvent.Type.Leave))
+
+    def test_hover_never_applies_to_the_active_row(self):
+        # paintEvent's `hovered` must be False whenever the row is
+        # checked, whatever the mouse is doing - the active-row fill and
+        # the hover fill are not meant to combine.
+        from frameworkgui.widgets import PaneItem
+        item = PaneItem("Settings", "settings")
+        item.setChecked(True)
+        active = item.isChecked()
+        hovered = not active and item.underMouse()
+        self.assertFalse(hovered)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestRunAllSafeDiagnostics(unittest.TestCase):
+    """The Diagnostics pane's chain runner. The worker-level tests call
+    _run_all_worker directly with synthetic tools rather than the real
+    ones - several real diagnostics sleep for tens of seconds by design
+    (fan_test, thermal_monitor), which their own single-tool tests already
+    cover; this class tests the sequencing/cancel/button-state logic in
+    isolation from what any individual tool actually does.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def fake_tool(self, key, danger=False):
+        return {"key": key, "label": "Fake " + key, "danger": danger,
+               "mode": None, "steps": None, "requires": None}
+
+    def test_the_button_starts_with_its_default_label(self):
+        self.assertEqual(self.window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+    def test_danger_tools_are_excluded_from_the_plan(self):
+        from unittest import mock
+        window = self.window
+        window._ask = mock.Mock(return_value=False)  # decline before it runs
+        window._run_all_safe_diagnostics()
+        prompt = window._ask.call_args[0][1]
+        # The prompt lists every tool it will run - the one danger tool
+        # (fan_burst, "Fan max burst") must never be named there.
+        self.assertNotIn("Fan max burst", prompt)
+
+    def test_declining_the_confirmation_runs_nothing(self):
+        from unittest import mock
+        window = self.window
+        window._ask = mock.Mock(return_value=False)
+        window.run_tool = mock.Mock()
+        window._run_all_safe_diagnostics()
+        window.run_tool.assert_not_called()
+
+    def test_the_worker_runs_each_tool_once_in_order(self):
+        window = self.window
+        order = []
+        window.tool_test_a = lambda: order.append("a")
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["a", "b"])
+
+    def test_a_tool_error_does_not_stop_the_rest_of_the_chain(self):
+        window = self.window
+
+        def boom():
+            raise RuntimeError("stub failure")
+        order = []
+        window.tool_test_a = boom
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["b"])
+
+    def test_cancelling_mid_chain_stops_the_remaining_tools(self):
+        window = self.window
+        order = []
+
+        def cancel_then_record():
+            window._cancel = True
+            order.append("a")
+        window.tool_test_a = cancel_then_record
+        window.tool_test_b = lambda: order.append("b")
+        plan = [(self.fake_tool("test_a"), {}), (self.fake_tool("test_b"), {})]
+        window._run_all_worker(plan)
+        self.assertEqual(order, ["a"])
+
+    def test_tool_values_reflect_the_tool_currently_running(self):
+        window = self.window
+        seen = {}
+        window.tool_test_a = lambda: seen.setdefault("a", dict(
+            window._tool_values))
+        plan = [(self.fake_tool("test_a"), {"dwell": 3})]
+        window._run_all_worker(plan)
+        self.assertEqual(seen["a"], {"dwell": 3})
+
+    def test_on_chain_step_highlights_only_the_current_row(self):
+        window = self.window
+        if len(window.tool_rows) < 2:
+            self.skipTest("not enough diagnostics on this detected model")
+        keys = list(window.tool_rows)
+        tool = next(t for t in fg.navigation.TOOLS if t["key"] == keys[0])
+        window._on_chain_step((tool, 0, 2))
+        self.assertEqual(window.tool_rows[keys[0]].property("running"),
+                         "true")
+        self.assertEqual(window.tool_rows[keys[1]].property("running"),
+                         "false")
+
+    def test_on_chain_step_none_clears_every_row(self):
+        window = self.window
+        for frame in window.tool_rows.values():
+            frame.setProperty("running", "true")
+        window._on_chain_step(None)
+        for frame in window.tool_rows.values():
+            self.assertEqual(frame.property("running"), "false")
+
+    def test_tool_done_restores_the_button_after_a_chain_run(self):
+        window = self.window
+        window._running_all = True
+        window.run_all_btn.setText("Cancel run-all")
+        window._tool_done()
+        self.assertFalse(window._running_all)
+        self.assertEqual(window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+    def test_tool_done_does_not_touch_the_button_for_an_ordinary_tool(self):
+        window = self.window
+        window._running_all = False
+        window.run_all_btn.setText("Run all safe diagnostics")
+        window._tool_done()
+        self.assertEqual(window.run_all_btn.text(),
+                         "Run all safe diagnostics")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestBayLabels(unittest.TestCase):
+    """A person's own note for a bay - the only way this app can ever name
+    a passive USB-C/USB-A card, since the CLI cannot identify one. Purely
+    local: nothing here is sent to a command."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_every_bay_row_has_a_label_button(self):
+        self.assertEqual(len(self.window.module_edit_buttons),
+                         len(self.window.module_rows))
+
+    def test_setting_a_label_shows_it_in_place_of_the_generic_name(self):
+        from unittest import mock
+        window = self.window
+        window._apply_readings({"ports": []})  # every row reads "not read"
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        _icon, name, _detail = window.module_rows[0]
+        self.assertEqual(name.text(), "My 1TB SSD")
+
+    def test_the_label_is_scoped_to_the_bay_key_and_persists(self):
+        from unittest import mock
+        window = self.window
+        key = window._bay_key_for_index(0)
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        self.assertEqual(
+            fg.appstate.bay_label(fg.appstate.load(),
+                                  window.caps.get("model", ""), key),
+            "My 1TB SSD")
+
+    def test_cancelling_the_dialog_changes_nothing(self):
+        from unittest import mock
+        window = self.window
+        before = window.module_rows[0][1].text()
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("ignored", False)):
+            window._edit_bay_label(0)
+        self.assertEqual(window.module_rows[0][1].text(), before)
+
+    def test_clearing_the_label_falls_back_to_the_generic_name(self):
+        from unittest import mock
+        window = self.window
+        window._apply_readings({"ports": []})
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("My 1TB SSD", True)):
+            window._edit_bay_label(0)
+        with mock.patch.object(fg.QInputDialog, "getText",
+                               return_value=("", True)):
+            window._edit_bay_label(0)
+        self.assertEqual(window.module_rows[0][1].text(), "Port 1")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPortsSourceNote(unittest.TestCase):
+    """The Ports & modules pane says which command actually answered, the
+    same thing the Overview's bay_source caption already says - an EC that
+    only supports the --pdports-chromebook fallback is not obvious from the
+    table rows alone."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_the_fallback_command_is_named(self):
+        self.window._apply_readings(
+            {"ports_source": "--pdports-chromebook", "ports": []})
+        text = self.window.ports_source_note.text()
+        self.assertIn("--pdports-chromebook", text)
+        self.assertIn("does not implement --pdports", text)
+
+    def test_the_primary_command_is_named_without_a_fallback_note(self):
+        self.window._apply_readings(
+            {"ports_source": "--pdports", "ports": []})
+        text = self.window.ports_source_note.text()
+        self.assertIn("--pdports", text)
+        self.assertNotIn("does not implement", text)
+
+    def test_nothing_read_yet_shows_no_note(self):
+        self.assertEqual(self.window.ports_source_note.text(), "")
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestPersistedSection(unittest.TestCase):
+    """Relaunching the app returns to the section it was last showing,
+    rather than always landing back on Overview. Neither test lets the
+    launch scan's QTimer fire (no app.exec(), no settle()), so there is no
+    worker thread to race with teardown."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def tearDown(self):
+        fg.appstate.save(fg.appstate.DEFAULTS)
+
+    def test_a_stored_section_is_restored_on_launch(self):
+        state = dict(fg.appstate.DEFAULTS)
+        state["last_section"] = "settings"
+        fg.appstate.save(state)
+        window = fg.App()
+        try:
+            self.assertEqual(window.section, "settings")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_selecting_a_section_persists_it(self):
+        window = fg.App()
+        try:
+            window._select_section("power")
+            self.assertEqual(fg.appstate.load()["last_section"], "power")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestKeyboardShortcuts(unittest.TestCase):
+    """F5 and Ctrl+N mirror the Rescan button and the rail, for anyone
+    driving the app from the keyboard rather than the mouse."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window._busy = False
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def _shortcut(self, sequence):
+        target = fg.QKeySequence(sequence)
+        return next(s for s in self.window.findChildren(fg.QShortcut)
+                   if s.key() == target)
+
+    def test_f5_triggers_a_rescan(self):
+        # Marking it busy first stops _rescan from actually spawning the
+        # detect thread - this only has to prove the shortcut reaches
+        # _rescan, the same guard TestBusyGuard exercises another way.
+        self.window._busy = True
+        self._shortcut("F5").activated.emit()
+        self.assertEqual(self.window.status_message.text(),
+                         "Busy — wait or cancel the running tool.")
+
+    def test_ctrl_number_keys_select_each_rail_group(self):
+        for index, group in enumerate(navigation.RAIL_GROUPS, start=1):
+            self._shortcut("Ctrl+{}".format(index)).activated.emit()
+            self.assertEqual(self.window.rail_key, group["key"])
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDrawerCopy(unittest.TestCase):
+    """The drawer's "copy" button, alongside its existing wrap/clear."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_copy_puts_the_current_tabs_text_on_the_clipboard(self):
+        self.window.drawer.append("framework_tool", "hello from a test\n")
+        self.window.drawer.select("framework_tool")
+        self.window.drawer._copy()
+        self.assertIn("hello from a test",
+                      fg.QGuiApplication.clipboard().text())
+
+    def test_current_stream_names_the_selected_tab(self):
+        self.window.drawer.append("ryzenadj", "x\n")
+        self.window.drawer.select("ryzenadj")
+        self.assertEqual(self.window.drawer._current_stream(), "ryzenadj")
+
+    def test_save_writes_the_current_tabs_text_to_the_chosen_path(self):
+        import tempfile
+        from unittest import mock
+        self.window.drawer.append("framework_tool", "saved output\n")
+        self.window.drawer.select("framework_tool")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "out.txt")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                self.window.drawer._save()
+            with open(target, encoding="utf-8") as fh:
+                self.assertIn("saved output", fh.read())
+
+    def test_cancelling_the_save_dialog_writes_nothing(self):
+        from unittest import mock
+        self.window.drawer.append("framework_tool", "x\n")
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            self.window.drawer._save()  # must not raise
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestDeviceSummary(unittest.TestCase):
+    """The Overview's two support-request actions: "Copy summary" (a
+    bug-report paste of the board/CPU/firmware detail plus the six stat
+    cards, without asking someone to retype what is on their screen) and
+    "Save diagram…" (the chassis/bay drawing as a PNG)."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_save_diagram_writes_a_png(self):
+        import tempfile
+        from unittest import mock
+        window = self.window
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "chassis.png")
+            with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                                   return_value=(target, "")):
+                window._save_chassis_image()
+            self.assertTrue(os.path.isfile(target))
+            self.assertGreater(os.path.getsize(target), 0)
+
+    def test_cancelling_save_diagram_writes_nothing(self):
+        from unittest import mock
+        with mock.patch.object(fg.QFileDialog, "getSaveFileName",
+                               return_value=("", "")):
+            self.window._save_chassis_image()  # must not raise
+
+    def test_summary_includes_board_detail_and_stat_cards(self):
+        window = self.window
+        window.caps["model"] = "Laptop 13 (AMD Ryzen 7040Series)"
+        window.firmware["ec"] = "azalea_v3.4.113405"
+        window.stat_cards["battery"].set_value("68% · 91.7% health")
+        window._copy_device_summary()
+        text = fg.QGuiApplication.clipboard().text()
+        self.assertIn("Laptop 13", text)
+        self.assertIn("azalea_v3.4.113405", text)
+        self.assertIn("Battery: 68% · 91.7% health", text)
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestUpdater(unittest.TestCase):
+    """The Setup pane's self-updater: check and download, never install.
+
+    Every test drives `_apply_update_check`/`_show_update_path` directly
+    with canned results rather than a real network call - the same
+    boundary `updater.describe()` itself is tested at, and the same
+    reason `TestManufacturerTdpRange` calls `_check_manufacturer_range`
+    directly instead of clicking a button that spawns a worker thread.
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def result(self, newer, asset_url="https://example/asset",
+               latest="9.9.9"):
+        return {"current": fg.__version__, "latest": latest, "newer": newer,
+               "html_url": "https://example/release",
+               "asset_name": "FrameworkGUI-Setup.exe",
+               "asset_url": asset_url if newer else None}
+
+    def action_texts(self):
+        """What `update_actions` currently holds, read from the layout
+        itself rather than findChildren() - a widget `_rebuild_update_actions`
+        just took out with deleteLater() stays a live child of the panel
+        until the event loop actually turns, so findChildren() can still
+        report it. The layout's own contents are what is actually shown."""
+        layout = self.window.update_actions
+        return [layout.itemAt(i).widget().text() for i in range(layout.count())]
+
+    def test_setup_shows_the_current_version_and_a_check_button(self):
+        page = self.window.pages["setup"]
+        self.assertIn("Check for updates", buttons_in(page))
+        self.assertIn("v" + fg.__version__, labels_in(page))
+
+    def test_an_available_update_offers_a_download_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.assertIn("Download v9.9.9",
+                      buttons_in(self.window.pages["setup"]))
+        self.assertIn("Release notes",
+                      buttons_in(self.window.pages["setup"]))
+
+    def test_being_up_to_date_offers_no_download_button(self):
+        self.window.sig_update_checked.emit(
+            self.result(newer=False, latest=fg.__version__))
+        texts = self.action_texts()
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("Release notes", texts)
+        self.assertIn(fg.__version__, self.window.update_status.text())
+
+    def test_a_release_with_no_matching_asset_says_so_instead_of_a_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True,
+                                                         asset_url=None))
+        texts = self.action_texts()
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("No FrameworkGUI-Setup.exe in that release yet.", texts)
+
+    def test_a_finished_download_shows_a_copyable_path_and_no_longer_the_button(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        texts = self.action_texts()
+        self.assertIn("Copy path", texts)
+        self.assertFalse([t for t in texts if t.startswith("Download")])
+        self.assertIn("/tmp/FrameworkGUI-Setup.exe", texts)
+
+    def test_rechecking_clears_a_previous_download_state(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.assertIn("Download v9.9.9", self.action_texts())
+
+    def test_clicking_copy_path_puts_it_on_the_clipboard_and_shows_a_toast(self):
+        self.window.sig_update_checked.emit(self.result(newer=True))
+        self.window.sig_update_downloaded.emit("/tmp/FrameworkGUI-Setup.exe")
+        button = next(b for b in
+                     self.window.update_panel.findChildren(fg.QPushButton)
+                     if b.text() == "Copy path")
+        button.click()
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "/tmp/FrameworkGUI-Setup.exe")
+        self.assertFalse(self.window.toast.isHidden())
+
+
+@unittest.skipUnless(CAN_RUN, "PySide6 unavailable or no Qt platform plugin")
+class TestToast(unittest.TestCase):
+    """The brief "Copied to clipboard" confirmation shown after every
+    clipboard-copy action in the app - the drawer's "copy", "Copy summary",
+    the Diagnostics/updater "Copy path" buttons, and both Drivers pane
+    "Copy link" buttons all go through the same `_copy_with_toast` helper."""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.window = fg.App()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_show_toast_makes_it_visible_with_the_given_text(self):
+        self.window._show_toast("Copied to clipboard")
+        self.assertEqual(self.window.toast.text(), "Copied to clipboard")
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_it_hides_itself_after_the_timer_fires(self):
+        self.window._show_toast("Copied to clipboard")
+        self.window.toast._timer.timeout.emit()
+        self.assertTrue(self.window.toast.isHidden())
+
+    def test_copy_with_toast_sets_the_clipboard_and_shows_the_toast(self):
+        self.window._copy_with_toast("a value to copy")
+        self.assertEqual(fg.QGuiApplication.clipboard().text(),
+                         "a value to copy")
+        self.assertEqual(self.window.toast.text(), "Copied to clipboard")
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_copy_device_summary_shows_the_toast(self):
+        self.window._copy_device_summary()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_drawer_copy_shows_the_toast(self):
+        self.window.drawer.append("framework_tool", "hello\n")
+        self.window.drawer.select("framework_tool")
+        self.window.drawer._copy()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_driver_copy_link_shows_the_toast(self):
+        self.window._copy_selected_driver_link()
+        self.assertFalse(self.window.toast.isHidden())
+
+    def test_reposition_centres_the_toast_over_the_parent_bottom_edge(self):
+        window = self.window
+        window.resize(900, 700)
+        window._show_toast("Copied to clipboard")
+        window.toast.reposition()
+        parent_rect = window.toast.parentWidget().rect()
+        expected_x = (parent_rect.width() - window.toast.width()) // 2
+        expected_y = parent_rect.height() - window.toast.height() - 24
+        self.assertEqual(window.toast.x(), expected_x)
+        self.assertEqual(window.toast.y(), expected_y)
+
+    def test_a_window_resize_repositions_a_visible_toast(self):
+        from unittest import mock
+
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+        window = self.window
+        window._show_toast("Copied to clipboard")
+        event = QResizeEvent(QSize(1200, 800), QSize(900, 700))
+        with mock.patch.object(window.toast, "reposition") as reposition:
+            window.resizeEvent(event)
+        reposition.assert_called_once()
+
+    def test_a_window_resize_leaves_a_hidden_toast_alone(self):
+        from unittest import mock
+
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+        window = self.window
+        event = QResizeEvent(QSize(1200, 800), QSize(900, 700))
+        with mock.patch.object(window.toast, "reposition") as reposition:
+            window.resizeEvent(event)
+        reposition.assert_not_called()
